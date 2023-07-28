@@ -164,8 +164,7 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 	if (tags > max_tags)
 		return -EINVAL;
 
-	/*@ loop invariant data_len >= 0;
-	  @ loop unroll tags; */
+	/*@ loop unroll tags; */
 	for (i = 0; i < tags; i++) {
 		if (data_len < sizeof(*entry))
 			return -EINVAL;
