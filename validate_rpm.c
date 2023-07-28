@@ -165,7 +165,7 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 		return -EINVAL;
 
 	/*@ loop invariant data_len >= 0;
-	  @ loop unroll 2; */
+	  @ loop unroll tags; */
 	for (i = 0; i < tags; i++) {
 		if (data_len < sizeof(*entry))
 			return -EINVAL;
@@ -212,7 +212,7 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 			return -EINVAL;
 	}
 
-	/* It does not work, I have to put a fixed value. */
+	/* It does not work, I have to put a fixed value (e.g. 32). */
  	digest_len = hash_digest_size[pkg_kernel_algo];
 
 	if (digests_offset >= hdr_data_len)
@@ -226,6 +226,7 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 
 	/*@ loop invariant \forall integer i; 0 <= i <= digests_count ==> digests_offset <= hdr_data_len;
 	  @ loop assigns i, digests_offset;
+	  @ loop unroll digests_count;
 	  @ loop variant i - digests_count; */
 	for (i = 0; i < digests_count; i++) {
 		if (digests_offset == hdr_data_len)
