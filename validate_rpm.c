@@ -16,6 +16,9 @@
 #define RPMTAG_FILEDIGESTS 1035
 #define RPMTAG_FILEDIGESTALGO 5011
 
+#define RPM_INT32_TYPE 4
+#define RPM_STRING_ARRAY_TYPE 8
+
 #define MD5_DIGEST_SIZE         16
 #define SHA1_DIGEST_SIZE        20
 #define RMD160_DIGEST_SIZE      20
@@ -51,7 +54,6 @@ struct rpm_entryinfo {
 	int32_t offset;
 	uint32_t count;
 } __attribute__((packed));
-
 
 enum pgp_algos {
 	DIGEST_ALGO_MD5		=  1,
@@ -135,7 +137,7 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 	};
 	const struct rpm_hdr *hdr;
 	const struct rpm_entryinfo *entry;
-	uint32_t tags, max_tags;
+	uint32_t tags, max_tags, datasize;
 	uint32_t digests_count, max_digests_count;
 	uint32_t digests_offset, algo_offset;
 	uint32_t digest_len, pkg_pgp_algo, i;
@@ -162,6 +164,10 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 	if (tags > max_tags)
 		return -EINVAL;
 
+	datasize = __be32_to_cpu(hdr->datasize);
+	if (datasize != data_len - tags * sizeof(*entry))
+		return -EINVAL;
+
 	//@ dynamic_split algo_offset_set;
 	//@ dynamic_split digests_offset_set;
 	//@ dynamic_split data_len;
@@ -175,11 +181,17 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 
 		switch (__be32_to_cpu(entry->tag)) {
 		case RPMTAG_FILEDIGESTS:
+			if (__be32_to_cpu(entry->type) != RPM_STRING_ARRAY_TYPE)
+				return -EINVAL;
+
 			digests_offset = __be32_to_cpu(entry->offset);
 			digests_count = __be32_to_cpu(entry->count);
 			digests_offset_set = true;
 			break;
 		case RPMTAG_FILEDIGESTALGO:
+			if (__be32_to_cpu(entry->type) != RPM_INT32_TYPE)
+				return -EINVAL;
+
 			algo_offset = __be32_to_cpu(entry->offset);
 			algo_offset_set = true;
 			break;
