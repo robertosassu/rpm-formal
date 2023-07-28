@@ -218,7 +218,8 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 	if (digests_offset >= hdr_data_len)
 		return -EINVAL;
 
-	max_digests_count = (hdr_data_len - digests_offset) / digest_len;
+	/* Worst case, every digest is a \0. */
+	max_digests_count = hdr_data_len - digests_offset;
 
 	/* Finite termination on digests_count loop. */
 	if (digests_count > max_digests_count)
