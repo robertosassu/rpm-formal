@@ -36,7 +36,7 @@
 #define STREEBOG256_DIGEST_SIZE	32
 #define STREEBOG512_DIGEST_SIZE	64
 
-#define LENGTH 1000
+#define LENGTH 5000
 
 struct rpm_hdr {
 	uint32_t magic;
@@ -141,10 +141,7 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 	uint32_t digest_len, pkg_pgp_algo, i;
 	bool algo_offset_set = false, digests_offset_set = false;
 	enum hash_algo pkg_kernel_algo = HASH_ALGO_MD5;
-	unsigned int hdr_data_len;
-	const unsigned char *hdr_data;
 
-	//@ assert data_len >= sizeof(*hdr);
 	if (data_len < sizeof(*hdr))
 		return -EINVAL;
 
@@ -153,6 +150,7 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 			return -EINVAL;
 	}
 
+	//@ assert data_len >= sizeof(*hdr);
 	hdr = (const struct rpm_hdr *)data;
 	data += sizeof(*hdr);
 	data_len -= sizeof(*hdr);
@@ -164,7 +162,9 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 	if (tags > max_tags)
 		return -EINVAL;
 
-	/*@ loop unroll tags; */
+	//@ dynamic_split algo_offset_set;
+	//@ dynamic_split digests_offset_set;
+	//@ dynamic_split data_len;
 	for (i = 0; i < tags; i++) {
 		if (data_len < sizeof(*entry))
 			return -EINVAL;
@@ -188,20 +188,17 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 		}
 	}
 
-	hdr_data = data;
-	hdr_data_len = data_len;
-
 	if (!digests_offset_set)
 		return -EINVAL;
 
 	if (algo_offset_set) {
-		if (algo_offset >= hdr_data_len)
+		if (algo_offset >= data_len)
 			return -EINVAL;
 
-		if (hdr_data_len - algo_offset < sizeof(uint32_t))
+		if (data_len - algo_offset < sizeof(uint32_t))
 			return -EINVAL;
 
-		pkg_pgp_algo = *(uint32_t *)&hdr_data[algo_offset];
+		pkg_pgp_algo = *(uint32_t *)&data[algo_offset];
 		pkg_pgp_algo = __be32_to_cpu(pkg_pgp_algo);
 		if (pkg_pgp_algo > DIGEST_ALGO_SHA224)
 			return -EINVAL;
@@ -211,36 +208,40 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 			return -EINVAL;
 	}
 
-	/* It does not work, I have to put a fixed value (e.g. 32). */
- 	digest_len = hash_digest_size[pkg_kernel_algo];
+	//@ merge algo_offset_set;
+	//@ merge digests_offset_set;
 
-	if (digests_offset >= hdr_data_len)
+	digest_len = hash_digest_size[pkg_kernel_algo];
+	//@ split digest_len;
+
+	if (digests_offset >= data_len)
 		return -EINVAL;
 
 	/* Worst case, every digest is a \0. */
-	max_digests_count = hdr_data_len - digests_offset;
+	max_digests_count = data_len - digests_offset;
 
 	/* Finite termination on digests_count loop. */
 	if (digests_count > max_digests_count)
 		return -EINVAL;
 
-	/*@ loop invariant \forall integer i; 0 <= i <= digests_count ==> digests_offset <= hdr_data_len;
+	/*@ loop invariant \forall integer i; 0 <= i <= digests_count ==> digests_offset <= data_len;
 	  @ loop assigns i, digests_offset;
-	  @ loop unroll digests_count;
 	  @ loop variant i - digests_count; */
 	for (i = 0; i < digests_count; i++) {
-		if (digests_offset == hdr_data_len)
+		if (digests_offset == data_len)
 			return -EINVAL;
 
-		if (!hdr_data[digests_offset]) {
+		//@ assert \valid_read(data+digests_offset);
+		if (!data[digests_offset]) {
 			digests_offset++;
 			continue;
 		}
 
-		if (hdr_data_len - digests_offset < digest_len * 2 + 1)
+		if (data_len - digests_offset < digest_len * 2 + 1)
 			return -EINVAL;
 
-		write(1, &hdr_data[digests_offset], digest_len * 2 + 1);
+		//@ assert \valid_read(data+(digests_offset..digest_len * 2 + 1));
+		write(1, &data[digests_offset], digest_len * 2 + 1);
 		printf("\n");
 
 		digests_offset += digest_len * 2 + 1;
@@ -277,11 +278,10 @@ int main(int argc, char *argv[])
 {
 #ifndef TEST
 	unsigned char a[LENGTH];
-	int i;
 
-	for (i = 0; i < LENGTH; i++) a[i] = Frama_C_unsigned_char_interval(0, 255);
+	Frama_C_make_unknown((char *)a, LENGTH);
 
-	return digest_list_parse_rpm(a, sizeof(a));
+	return digest_list_parse_rpm(a, LENGTH);
 #else
 	unsigned char *data;
 	size_t data_len;
