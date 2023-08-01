@@ -1,16 +1,48 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Copyright (C) 2023 Huawei Technologies Duesseldorf GmbH
+ *
+ * Author: Roberto Sassu <roberto.sassu@huawei.com>
+ *
+ * Implement the RPM parser.
+ */
+
 #include <stdio.h>
 #include <errno.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <time.h>
+#ifndef __FRAMAC__
 #include <asm/byteorder.h>
+#else
+#define __cpu_to_be32(x) x
+#define __be32_to_cpu(x) x
+#endif
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <stdbool.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <string.h>
 
-#ifndef TEST
+#ifdef __FRAMAC__
 #include "__fc_builtin.h"
+#else
+static void Frama_C_make_unknown(char *src, int src_len)
+{
+	int i;
+
+	srand(time(NULL));
+
+	for (i = 0; i < src_len; i++)
+		src[i] = rand() % 256;
+}
+static int Frama_C_int_interval(int low, int high)
+{
+	srand(time(NULL));
+	return (rand() % (high - low)) + low;
+}
 #endif
 
 #define RPMTAG_FILEDIGESTS 1035
@@ -39,7 +71,7 @@
 #define STREEBOG256_DIGEST_SIZE	32
 #define STREEBOG512_DIGEST_SIZE	64
 
-#define LENGTH 5000
+#define LENGTH 1000
 
 struct rpm_hdr {
 	uint32_t magic;
@@ -128,7 +160,17 @@ static const int hash_digest_size[HASH_ALGO__LAST] = {
 	[HASH_ALGO_STREEBOG_512] = STREEBOG512_DIGEST_SIZE,
 };
 
+bool valid_buffer = false;
+
 /*@ requires \valid_read(data+(0..data_len-1)) && \initialized(data+(0..data_len-1));
+  @ behavior valid_header:
+  @   assumes valid_buffer == true;
+  @   ensures \result == 0;
+  @ behavior unknown_header:
+  @   assumes valid_buffer == false;
+  @   ensures \result == 0 || \result == -EINVAL;
+  @ complete behaviors valid_header, unknown_header;
+  @ disjoint behaviors valid_header, unknown_header;
  */
 int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 {
@@ -226,7 +268,7 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 	digest_len = hash_digest_size[pkg_kernel_algo];
 	//@ split digest_len;
 
-	if (digests_offset >= data_len)
+	if (digests_offset > data_len)
 		return -EINVAL;
 
 	/* Worst case, every digest is a \0. */
@@ -252,7 +294,8 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 		if (data_len - digests_offset < digest_len * 2 + 1)
 			return -EINVAL;
 
-		//@ assert \valid_read(data+(digests_offset..digest_len * 2 + 1));
+		//@ assert \valid_read(data+(digests_offset..digests_offset + digest_len * 2));
+		//@ assert !valid_buffer || data[digests_offset] == 'A';
 		write(1, &data[digests_offset], digest_len * 2 + 1);
 		printf("\n");
 
@@ -260,6 +303,100 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 	}
 
 	return 0;
+}
+
+void digest_list_gen_rpm_deterministic(void)
+{
+	char digest_str[129] = { "A" };
+	unsigned char a[LENGTH], *data_ptr;
+	const unsigned char rpm_header_magic[8] = {
+		0x8e, 0xad, 0xe8, 0x01, 0x00, 0x00, 0x00, 0x00
+	};
+	struct rpm_hdr *hdr;
+	struct rpm_entryinfo *entry;
+	uint32_t tags, datasize;
+	uint32_t digests_tag_idx, algo_tag_idx;
+	uint32_t digests_offset, digests_count;
+	uint32_t algo_offset = 0;
+	uint32_t digest_len, i;
+	uint32_t algo = DIGEST_ALGO_MD5, algo_data;
+	uint32_t digest_str_len, offset;
+	enum hash_algo kernel_algo;
+	int ret __attribute__((unused));
+
+	memset(a, 0, sizeof(a));
+	memcpy(a, rpm_header_magic, sizeof(rpm_header_magic));
+
+	hdr = (struct rpm_hdr *)a;
+	tags = Frama_C_int_interval(2, 4);
+	//@ split tags;
+
+	hdr->tags = __cpu_to_be32(tags);
+	datasize = LENGTH - tags * sizeof(*entry) - sizeof(*hdr);
+	hdr->datasize = __cpu_to_be32(datasize);
+
+	algo = Frama_C_int_interval(DIGEST_ALGO_MD5, DIGEST_ALGO_SHA224);
+	//@ split algo;
+
+	algo_data = __cpu_to_be32(algo);
+	kernel_algo = pgp_algo_mapping[algo];
+
+	/* Skip the reserved values. */
+	if (kernel_algo >= HASH_ALGO__LAST)
+		return;
+
+	digest_len = hash_digest_size[kernel_algo];
+	digest_str_len = digest_len * 2 + 1;
+
+	digests_count = Frama_C_int_interval(0,
+				(datasize - sizeof(algo) * 2) / digest_str_len);
+	//@ dynamic_split digests_count;
+
+	digests_tag_idx = Frama_C_int_interval(0, tags - 1);
+	//@ dynamic_split digests_tag_idx;
+
+	algo_tag_idx = !digests_tag_idx ? tags - 1 : 0;
+
+	digests_offset = Frama_C_int_interval(sizeof(algo),
+				datasize - (digests_count * digest_str_len));
+	//@ dynamic_split digests_offset;
+
+	data_ptr = a + sizeof(*hdr) + tags * sizeof(*entry);
+
+	for (i = 0; i < digests_count; i++) {
+		offset = digests_offset + i * digest_str_len;
+		memcpy(data_ptr + offset, digest_str, digest_len * 2);
+		data_ptr[offset + digest_len * 2] = '\0';
+	}
+
+	if (digests_offset >= sizeof(algo))
+		algo_offset = digests_offset - sizeof(algo);
+	else
+		algo_offset = digests_offset + digests_count * digest_str_len;
+
+	memcpy(data_ptr + algo_offset, &algo_data, sizeof(algo_data));
+
+	entry = (struct rpm_entryinfo *)(a + sizeof(*hdr));
+	entry[digests_tag_idx].tag = __cpu_to_be32(RPMTAG_FILEDIGESTS);
+	entry[digests_tag_idx].type = __cpu_to_be32(RPM_STRING_ARRAY_TYPE);
+	entry[digests_tag_idx].count = __cpu_to_be32(digests_count);
+	entry[digests_tag_idx].offset = __cpu_to_be32(digests_offset);
+
+	entry[algo_tag_idx].tag = __cpu_to_be32(RPMTAG_FILEDIGESTALGO);
+	entry[algo_tag_idx].type = __cpu_to_be32(RPM_INT32_TYPE);
+	entry[algo_tag_idx].count = __cpu_to_be32(1);
+	entry[algo_tag_idx].offset = __cpu_to_be32(algo_offset);
+
+	ret = digest_list_parse_rpm(a, LENGTH);
+	//@ assert ret == 0;
+}
+
+void digest_list_gen_rpm_non_deterministic(void)
+{
+	unsigned char a[LENGTH];
+
+	Frama_C_make_unknown((char *)a, LENGTH);
+	digest_list_parse_rpm(a, LENGTH);
 }
 
 #ifdef TEST
@@ -286,14 +423,17 @@ int read_file(const char *path, size_t *len, unsigned char **data)
 }
 #endif
 
+//@ requires argv != NULL && \valid_read(argv+(0..argc - 1)) && \initialized(argv);
 int main(int argc, char *argv[])
 {
 #ifndef TEST
-	unsigned char a[LENGTH];
+	if (argc != 1 || !argv[0])
+		return -ENOENT;
 
-	Frama_C_make_unknown((char *)a, LENGTH);
-
-	return digest_list_parse_rpm(a, LENGTH);
+	valid_buffer = true;
+	digest_list_gen_rpm_deterministic();
+	valid_buffer = false;
+	digest_list_gen_rpm_non_deterministic();
 #else
 	unsigned char *data;
 	size_t data_len;
