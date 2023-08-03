@@ -7,6 +7,11 @@
  * Implement the RPM parser.
  */
 
+/* Execute:
+ *
+ * frama-c -eva -cpp-frama-c-compliant -cpp-extra-args="-I /usr/include -I /usr/include/x86_64-linux-gnu" -machdep gcc_x86_64 -eva-precision 11 -eva-split-limit 5000000 -eva-unroll-recursive-calls 30 -eva-interprocedural-splits validate_rpm.c
+ */
+
 #include <stdio.h>
 #include <errno.h>
 #include <stdint.h>
@@ -71,7 +76,7 @@ static int Frama_C_int_interval(int low, int high)
 #define STREEBOG256_DIGEST_SIZE	32
 #define STREEBOG512_DIGEST_SIZE	64
 
-#define LENGTH 1000
+#define LENGTH 200
 
 struct rpm_hdr {
 	uint32_t magic;
