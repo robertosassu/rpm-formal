@@ -9,7 +9,7 @@
 
 /* Execute:
  *
- * frama-c -eva -cpp-frama-c-compliant -cpp-extra-args="-I /usr/include -I /usr/include/x86_64-linux-gnu" -machdep gcc_x86_64 -eva-precision 11 -eva-split-limit 5000000 -eva-unroll-recursive-calls 30 -eva-interprocedural-splits validate_rpm.c
+ * frama-c -eva -cpp-frama-c-compliant -cpp-extra-args="-I /usr/include -I /usr/include/x86_64-linux-gnu" -machdep gcc_x86_64 -eva-precision 1 -eva-split-limit 5000 validate_rpm.c
  */
 
 #include <stdio.h>
@@ -30,6 +30,13 @@
 #include <unistd.h>
 #include <ctype.h>
 #include <string.h>
+
+#define pr_debug printf
+
+typedef uint8_t u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
 
 #ifdef __FRAMAC__
 #include "__fc_builtin.h"
@@ -141,6 +148,28 @@ static const enum hash_algo pgp_algo_mapping[DIGEST_ALGO_SHA224 + 1] = {
 	[DIGEST_ALGO_SHA224]	= HASH_ALGO_SHA224,
 };
 
+const char *const hash_algo_name[HASH_ALGO__LAST] = {
+	[HASH_ALGO_MD4]		= "md4",
+	[HASH_ALGO_MD5]		= "md5",
+	[HASH_ALGO_SHA1]	= "sha1",
+	[HASH_ALGO_RIPE_MD_160]	= "rmd160",
+	[HASH_ALGO_SHA256]	= "sha256",
+	[HASH_ALGO_SHA384]	= "sha384",
+	[HASH_ALGO_SHA512]	= "sha512",
+	[HASH_ALGO_SHA224]	= "sha224",
+	[HASH_ALGO_RIPE_MD_128]	= "rmd128",
+	[HASH_ALGO_RIPE_MD_256]	= "rmd256",
+	[HASH_ALGO_RIPE_MD_320]	= "rmd320",
+	[HASH_ALGO_WP_256]	= "wp256",
+	[HASH_ALGO_WP_384]	= "wp384",
+	[HASH_ALGO_WP_512]	= "wp512",
+	[HASH_ALGO_TGR_128]	= "tgr128",
+	[HASH_ALGO_TGR_160]	= "tgr160",
+	[HASH_ALGO_TGR_192]	= "tgr192",
+	[HASH_ALGO_SM3_256]	= "sm3",
+	[HASH_ALGO_STREEBOG_256] = "streebog256",
+	[HASH_ALGO_STREEBOG_512] = "streebog512",
+};
 
 static const int hash_digest_size[HASH_ALGO__LAST] = {
 	[HASH_ALGO_MD4]		= MD5_DIGEST_SIZE,
@@ -165,6 +194,39 @@ static const int hash_digest_size[HASH_ALGO__LAST] = {
 	[HASH_ALGO_STREEBOG_512] = STREEBOG512_DIGEST_SIZE,
 };
 
+/**
+ * struct digest_cache - Digest cache
+ * @num_slots: Number of slots
+ * @algo: Algorithm of digests stored in the cache
+ * @path_str: Path of the digest list the cache was created from
+ * @mask: For which IMA actions and purpose the digest cache can be used
+ *
+ * This structure represents a cache of digests extracted from a file, to be
+ * primarily used for IMA measurement and appraisal.
+ */
+struct digest_cache {
+	unsigned int num_slots;
+	enum hash_algo algo;
+	char *path_str;
+	u8 mask;
+};
+
+static int digest_cache_init_htable(struct digest_cache *digest_cache,
+				    u64 num_digests)
+{
+	return 0;
+}
+
+static int digest_cache_add(struct digest_cache *digest_cache, u8 *digest)
+{
+	return 0;
+}
+
+int hex2bin(u8 *dst, const char *src, size_t count)
+{
+	return 0;
+}
+
 bool valid_buffer = false;
 
 /*@ requires \valid_read(data+(0..data_len-1)) && \initialized(data+(0..data_len-1));
@@ -177,7 +239,8 @@ bool valid_buffer = false;
   @ complete behaviors valid_header, unknown_header;
   @ disjoint behaviors valid_header, unknown_header;
  */
-int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
+int digest_list_parse_rpm(struct digest_cache *digest_cache, const u8 *data,
+			  size_t data_len)
 {
 	const unsigned char rpm_header_magic[8] = {
 		0x8e, 0xad, 0xe8, 0x01, 0x00, 0x00, 0x00, 0x00
@@ -190,13 +253,20 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 	uint32_t digest_len, pkg_pgp_algo, i;
 	bool algo_offset_set = false, digests_offset_set = false;
 	enum hash_algo pkg_kernel_algo = HASH_ALGO_MD5;
+	u8 rpm_digest[SHA512_DIGEST_SIZE];
+	int ret;
 
-	if (data_len < sizeof(*hdr))
+	if (data_len < sizeof(*hdr)) {
+		pr_debug("Not enough data for RPM header, current %ld, expected: %ld\n",
+			 data_len, sizeof(*hdr));
 		return -EINVAL;
+	}
 
 	for (i = 0; i < sizeof(rpm_header_magic); i++) {
-		if (data[i] != rpm_header_magic[i])
+		if (data[i] != rpm_header_magic[i]) {
+			pr_debug("RPM header magic mismatch\n");
 			return -EINVAL;
+		}
 	}
 
 	//@ assert data_len >= sizeof(*hdr);
@@ -214,6 +284,8 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 	datasize = __be32_to_cpu(hdr->datasize);
 	if (datasize != data_len - tags * sizeof(*entry))
 		return -EINVAL;
+
+	pr_debug("Scanning %d RPM header sections\n", tags);
 
 	//@ dynamic_split algo_offset_set;
 	//@ dynamic_split digests_offset_set;
@@ -234,6 +306,9 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 			digests_offset = __be32_to_cpu(entry->offset);
 			digests_count = __be32_to_cpu(entry->count);
 			digests_offset_set = true;
+
+			pr_debug("Found RPMTAG_FILEDIGESTS at offset %u, count: %u\n",
+				 digests_offset, digests_count);
 			break;
 		case RPMTAG_FILEDIGESTALGO:
 			if (__be32_to_cpu(entry->type) != RPM_INT32_TYPE)
@@ -241,6 +316,9 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 
 			algo_offset = __be32_to_cpu(entry->offset);
 			algo_offset_set = true;
+
+			pr_debug("Found RPMTAG_FILEDIGESTALGO at offset %u\n",
+				 algo_offset);
 			break;
 		default:
 			break;
@@ -259,17 +337,26 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 
 		pkg_pgp_algo = *(uint32_t *)&data[algo_offset];
 		pkg_pgp_algo = __be32_to_cpu(pkg_pgp_algo);
-		if (pkg_pgp_algo > DIGEST_ALGO_SHA224)
+		if (pkg_pgp_algo > DIGEST_ALGO_SHA224) {
+			pr_debug("Unknown PGP algo %d\n", pkg_pgp_algo);
 			return -EINVAL;
+		}
 
 		pkg_kernel_algo = pgp_algo_mapping[pkg_pgp_algo];
-		if (pkg_kernel_algo >= HASH_ALGO__LAST)
+		if (pkg_kernel_algo >= HASH_ALGO__LAST) {
+			pr_debug("Unknown mapping for PGP algo %d\n",
+				 pkg_pgp_algo);
 			return -EINVAL;
+		}
+
+		pr_debug("Found mapping for PGP algo %d: %s\n", pkg_pgp_algo,
+			 hash_algo_name[pkg_kernel_algo]);
 	}
 
 	//@ merge algo_offset_set;
 	//@ merge digests_offset_set;
 
+	digest_cache->algo = pkg_kernel_algo;
 	digest_len = hash_digest_size[pkg_kernel_algo];
 	//@ split digest_len;
 
@@ -304,6 +391,19 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 		write(1, &data[digests_offset], digest_len * 2 + 1);
 		printf("\n");
 
+		ret = hex2bin(rpm_digest, (const char *)&data[digests_offset],
+			      digest_len);
+		if (ret < 0) {
+			pr_debug("Invalid hex format for digest %s\n",
+				 &data[digests_offset]);
+			ret = -EINVAL;
+			break;
+		}
+
+		ret = digest_cache_add(digest_cache, rpm_digest);
+		if (ret < 0)
+			return ret;
+
 		digests_offset += digest_len * 2 + 1;
 	}
 
@@ -312,6 +412,7 @@ int digest_list_parse_rpm(const unsigned char *data, unsigned int data_len)
 
 void digest_list_gen_rpm_deterministic(void)
 {
+	struct digest_cache digest_cache = { 0 };
 	char digest_str[129] = { "A" };
 	unsigned char a[LENGTH], *data_ptr;
 	const unsigned char rpm_header_magic[8] = {
@@ -392,16 +493,17 @@ void digest_list_gen_rpm_deterministic(void)
 	entry[algo_tag_idx].count = __cpu_to_be32(1);
 	entry[algo_tag_idx].offset = __cpu_to_be32(algo_offset);
 
-	ret = digest_list_parse_rpm(a, LENGTH);
+	ret = digest_list_parse_rpm(&digest_cache, a, LENGTH);
 	//@ assert ret == 0;
 }
 
 void digest_list_gen_rpm_non_deterministic(void)
 {
+	struct digest_cache digest_cache = { 0 };
 	unsigned char a[LENGTH];
 
 	Frama_C_make_unknown((char *)a, LENGTH);
-	digest_list_parse_rpm(a, LENGTH);
+	digest_list_parse_rpm(&digest_cache, a, LENGTH);
 }
 
 #ifdef TEST
@@ -440,6 +542,7 @@ int main(int argc, char *argv[])
 	valid_buffer = false;
 	digest_list_gen_rpm_non_deterministic();
 #else
+	struct digest_cache digest_cache = { 0 };
 	unsigned char *data;
 	size_t data_len;
 	int ret;
@@ -451,7 +554,7 @@ int main(int argc, char *argv[])
 	if (ret < 0)
 		return ret;
 
-	ret = digest_list_parse_rpm(data, data_len);
+	ret = digest_list_parse_rpm(&digest_cache, data, data_len);
 	munmap(data, data_len);
 
 	return ret;
