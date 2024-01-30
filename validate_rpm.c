@@ -211,13 +211,14 @@ struct digest_cache {
 	u8 mask;
 };
 
-static int digest_cache_init_htable(struct digest_cache *digest_cache,
-				    u64 num_digests)
+static int digest_cache_htable_init(struct digest_cache *digest_cache,
+				    u64 num_digests, enum hash_algo algo)
 {
 	return 0;
 }
 
-static int digest_cache_add(struct digest_cache *digest_cache, u8 *digest)
+static int digest_cache_htable_add(struct digest_cache *digest_cache,
+				   u8 *digest, enum hash_algo algo)
 {
 	return 0;
 }
@@ -229,6 +230,16 @@ int hex2bin(u8 *dst, const char *src, size_t count)
 
 bool valid_buffer = false;
 
+/**
+ * digest_list_parse_rpm - Parse a tlv digest list
+ * @digest_cache: Digest cache
+ * @data: Data to parse
+ * @data_len: Length of @data
+ *
+ * This function parses an rpm digest list.
+ *
+ * Return: Zero on success, a POSIX error code otherwise.
+ */
 /*@ requires \valid_read(data+(0..data_len-1)) && \initialized(data+(0..data_len-1));
   @ behavior valid_header:
   @   assumes valid_buffer == true;
@@ -247,10 +258,10 @@ int digest_list_parse_rpm(struct digest_cache *digest_cache, const u8 *data,
 	};
 	const struct rpm_hdr *hdr;
 	const struct rpm_entryinfo *entry;
-	uint32_t tags, max_tags, datasize;
-	uint32_t digests_count, max_digests_count;
-	uint32_t digests_offset, algo_offset;
-	uint32_t digest_len, pkg_pgp_algo, i;
+	u32 tags, max_tags, datasize;
+	u32 digests_count, max_digests_count;
+	u32 digests_offset, algo_offset;
+	u32 digest_len, pkg_pgp_algo, i;
 	bool algo_offset_set = false, digests_offset_set = false;
 	enum hash_algo pkg_kernel_algo = HASH_ALGO_MD5;
 	u8 rpm_digest[SHA512_DIGEST_SIZE];
@@ -286,7 +297,6 @@ int digest_list_parse_rpm(struct digest_cache *digest_cache, const u8 *data,
 		return -EINVAL;
 
 	pr_debug("Scanning %d RPM header sections\n", tags);
-
 	//@ dynamic_split algo_offset_set;
 	//@ dynamic_split digests_offset_set;
 	//@ dynamic_split data_len;
@@ -326,7 +336,7 @@ int digest_list_parse_rpm(struct digest_cache *digest_cache, const u8 *data,
 	}
 
 	if (!digests_offset_set)
-		return -EINVAL;
+		return 0;
 
 	if (algo_offset_set) {
 		if (algo_offset >= data_len)
@@ -370,6 +380,11 @@ int digest_list_parse_rpm(struct digest_cache *digest_cache, const u8 *data,
 	if (digests_count > max_digests_count)
 		return -EINVAL;
 
+	ret = digest_cache_htable_init(digest_cache, digests_count,
+				       pkg_kernel_algo);
+	if (ret < 0)
+		return ret;
+
 	/*@ loop invariant \forall integer i; 0 <= i <= digests_count ==> digests_offset <= data_len;
 	  @ loop assigns i, digests_offset;
 	  @ loop variant i - digests_count; */
@@ -396,18 +411,18 @@ int digest_list_parse_rpm(struct digest_cache *digest_cache, const u8 *data,
 		if (ret < 0) {
 			pr_debug("Invalid hex format for digest %s\n",
 				 &data[digests_offset]);
-			ret = -EINVAL;
-			break;
+			return -EINVAL;
 		}
 
-		ret = digest_cache_add(digest_cache, rpm_digest);
+		ret = digest_cache_htable_add(digest_cache, rpm_digest,
+					      pkg_kernel_algo);
 		if (ret < 0)
 			return ret;
 
 		digests_offset += digest_len * 2 + 1;
 	}
 
-	return 0;
+	return ret;
 }
 
 void digest_list_gen_rpm_deterministic(void)
