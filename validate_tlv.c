@@ -428,38 +428,53 @@ int tlv_parse(__u64 expected_data_type, parse_callback callback,
 	      const char **fields, __u64 num_fields)
 {
 	__u64 parsed_data_type, parsed_num_entries, parsed_total_len;
+	const __u8 *data_ptr = data;
 	int ret = 0;
 
 	pr_debug("Start parsing data blob, size: %lu, expected data type: %s\n",
 		 data_len, data_types[expected_data_type]);
 
+	//@ dynamic_split data_len;
 	while (data_len) {
-		ret = tlv_parse_hdr(&data, &data_len, &parsed_data_type,
+		ret = tlv_parse_hdr(&data_ptr, &data_len, &parsed_data_type,
 				    &parsed_num_entries, &parsed_total_len,
 				    data_types, num_data_types);
 		if (ret < 0)
 			goto out;
 
-		if (parsed_data_type == expected_data_type)
-			break;
+		//@ dynamic_split parsed_total_len;
 
-		/*
-		 * tlv_parse_hdr() already checked that
-		 * parsed_total_len <= data_len.
-		 */
-		data += parsed_total_len;
+		/* Skip data with a different data type than expected. */
+		if (parsed_data_type != expected_data_type) {
+			/*
+			 * tlv_parse_hdr() already checked that
+			 * parsed_total_len <= data_len.
+			 */
+			data_ptr += parsed_total_len;
+			data_len -= parsed_total_len;
+			continue;
+		}
+
+		pr_debug("Found data type %s at offset %ld\n",
+			 data_types[parsed_data_type], data_ptr - data);
+
+		ret = tlv_parse_data(callback, callback_data,
+				     parsed_num_entries, data_ptr,
+				     parsed_total_len, fields, num_fields);
+		if (ret < 0)
+			goto out;
+
+		data_ptr += parsed_total_len;
 		data_len -= parsed_total_len;
+		//@ merge parsed_total_len;
 	}
 
-	if (!data_len) {
-		pr_debug("Data type %s not found\n",
-			 data_types[expected_data_type]);
-		ret = -ENOENT;
-		goto out;
-	}
+	//@ merge data_len;
 
-	ret = tlv_parse_data(callback, callback_data, parsed_num_entries, data,
-			     parsed_total_len, fields, num_fields);
+	if (data_len) {
+		pr_debug("Excess data length %lu\n", data_len);
+		ret = -EINVAL;
+	}
 out:
 	pr_debug("End of parsing data blob, ret: %d\n", ret);
 	return ret;
