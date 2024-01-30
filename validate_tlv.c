@@ -33,6 +33,12 @@
 #include <string.h>
 #include <linux/types.h>
 
+typedef __u8 u8;
+typedef __u16 u16;
+typedef __u32 u32;
+typedef __s32 s32;
+typedef __u64 u64;
+
 #ifdef __FRAMAC__
 #include "__fc_builtin.h"
 #else
@@ -63,15 +69,20 @@ static int Frama_C_int_interval(int low, int high)
 	DIGEST_LIST_TYPE(DIGEST_LIST_FILE) \
 	DIGEST_LIST_TYPE(DIGEST_LIST__LAST)
 
-#define FOR_EACH_FIELD(FIELD) \
-	FIELD(DIGEST_LIST_ALGO) \
-	FIELD(DIGEST_LIST_ENTRY) \
-	FIELD(FIELD__LAST)
+#define FOR_EACH_DIGEST_LIST_FIELD(DIGEST_LIST_FIELD) \
+	DIGEST_LIST_FIELD(DIGEST_LIST_ALGO) \
+	DIGEST_LIST_FIELD(DIGEST_LIST_ENTRY) \
+	DIGEST_LIST_FIELD(DIGEST_LIST_FIELD__LAST)
 
-#define FOR_EACH_ENTRY_FIELD(ENTRY_FIELD) \
-	ENTRY_FIELD(ENTRY_DIGEST) \
-	ENTRY_FIELD(ENTRY_PATH) \
-	ENTRY_FIELD(ENTRY__LAST)
+#define FOR_EACH_DIGEST_LIST_ENTRY_TYPE(DIGEST_LIST_ENTRY_TYPE) \
+	DIGEST_LIST_ENTRY_TYPE(DIGEST_LIST_ENTRY_DATA) \
+	DIGEST_LIST_ENTRY_TYPE(DIGEST_LIST_ENTRY__LAST)
+
+#define FOR_EACH_DIGEST_LIST_ENTRY_FIELD(DIGEST_LIST_ENTRY_FIELD) \
+	DIGEST_LIST_ENTRY_FIELD(DIGEST_LIST_ENTRY_DIGEST) \
+	DIGEST_LIST_ENTRY_FIELD(DIGEST_LIST_ENTRY_PATH) \
+	DIGEST_LIST_ENTRY_FIELD(DIGEST_LIST_ENTRY_FIELD__LAST)
+
 
 #define GENERATE_ENUM(ENUM) ENUM,
 #define GENERATE_STRING(STRING) #STRING,
@@ -102,9 +113,9 @@ static int Frama_C_int_interval(int low, int high)
 typedef int (*parse_callback)(void *, __u64, const __u8 *, __u64);
 
 /**
- * enum digest_list_types - Type of digest list
+ * enum digest_list_types - Types of digest list
  *
- * Enumerates the types of digest lists to parse.
+ * Enumerates the types of digest list to parse.
  */
 enum digest_list_types {
 	FOR_EACH_DIGEST_LIST_TYPE(GENERATE_ENUM)
@@ -116,43 +127,52 @@ enum digest_list_types {
  * Enumerates the digest list fields.
  */
 enum digest_list_fields {
-	FOR_EACH_FIELD(GENERATE_ENUM)
+	FOR_EACH_DIGEST_LIST_FIELD(GENERATE_ENUM)
 };
 
 /**
- * enum entry_fields - Entry-specific fields
+ * enum digest_list_entry_types - Types of data stored in DIGEST_LIST_ENTRY
  *
- * Enumerates the digest list entry-specific fields.
+ * Enumerates the types of data stored in DIGEST_LIST_ENTRY (nested TLV data).
  */
-enum entry_fields {
-	FOR_EACH_ENTRY_FIELD(GENERATE_ENUM)
+enum digest_list_entry_types {
+	FOR_EACH_DIGEST_LIST_ENTRY_TYPE(GENERATE_ENUM)
+};
+
+/**
+ * enum digest_list_entry_fields - DIGEST_LIST_ENTRY fields
+ *
+ * Enumerates the DIGEST_LIST_ENTRY fields.
+ */
+enum digest_list_entry_fields {
+	FOR_EACH_DIGEST_LIST_ENTRY_FIELD(GENERATE_ENUM)
 };
 
 /**
  * struct tlv_hdr - Header of TLV format
  * @data_type: Type of data to parse
- * @num_fields: Number of fields provided
- * @_reserved: Reserved for future use
+ * @num_entries: Number of data entries provided
+ * @_reserved: Reserved for future use (must be equal to zero)
  * @total_len: Total length of the data blob, excluding the header
  *
  * This structure represents the header of the TLV data format.
  */
 struct tlv_hdr {
 	__u64 data_type;
-	__u64 num_fields;
+	__u64 num_entries;
 	__u64 _reserved;
 	__u64 total_len;
 } __attribute__((packed));
 
 /**
- * struct tlv_entry - Data entry of TLV format
+ * struct tlv_data_entry - Data entry of TLV format
  * @field: Data field identifier
  * @length: Data length
  * @data: Data
  *
  * This structure represents a TLV entry of the data part of TLV data format.
  */
-struct tlv_entry {
+struct tlv_data_entry {
 	__u64 field;
 	__u64 length;
 	__u8 data[];
@@ -228,46 +248,31 @@ static const int hash_digest_size[HASH_ALGO__LAST] = {
 	[HASH_ALGO_STREEBOG_512] = STREEBOG512_DIGEST_SIZE,
 };
 
-/**
- * struct digest_cache - Digest cache
- * @num_slots: Number of slots
- * @algo: Algorithm of digests stored in the cache
- * @path_str: Path of the digest list the cache was created from
- * @mask: For which IMA actions and purpose the digest cache can be used
- *
- * This structure represents a cache of digests extracted from a file, to be
- * primarily used for IMA measurement and appraisal.
- */
-struct digest_cache {
-	unsigned int num_slots;
-	enum hash_algo algo;
-	char *path_str;
-	__u8 mask;
-};
-
 bool valid_buffer = false;
 
 /**
- * tlv_parse_hdr - Parse a TLV header
+ * tlv_parse_hdr - Parse TLV header
  * @data: Data to parse (updated)
  * @data_len: Length of @data (updated)
  * @parsed_data_type: Parsed data type (updated)
- * @parsed_num_fields: Parsed data fields (updated)
- * @parsed_total_len: Length of parsed data part, excluding the header (updated)
+ * @parsed_num_entries: Parsed number of data entries (updated)
+ * @parsed_total_len: Parsed length of TLV data, excluding the header (updated)
  * @data_types: Array of data type strings
  * @num_data_types: Number of elements of @data_types
  *
- * Parse the header of the TLV data format, update the data pointer and length,
- * and provide the data type, number of fields and the length of that element.
+ * Parse the header of the TLV data format, move the data pointer to the TLV
+ * data part, decrease the data length by the length of the header, and provide
+ * the data type, number of entries and the total data length extracted from the
+ * header.
  *
  * Return: Zero on success, a negative value on error.
  */
-/*@ requires \valid_read(*data+(0..*data_len-1)) && \initialized(*data+(0..*data_len-1)) && \valid(parsed_data_type) && \valid(parsed_num_fields) && \valid(parsed_total_len) && \valid_read(data_types);
-  @ assigns *data, *data_len, *parsed_num_fields, *parsed_total_len;
+/*@ requires \valid_read(*data+(0..*data_len-1)) && \initialized(*data+(0..*data_len-1)) && \valid(parsed_data_type) && \valid(parsed_num_entries) && \valid(parsed_total_len) && \valid_read(data_types);
+  @ assigns *data, *data_len, *parsed_num_entries, *parsed_total_len;
   @ ensures \valid_read(*data+(0..*data_len-1));
  */
 int tlv_parse_hdr(const __u8 **data, size_t *data_len, __u64 *parsed_data_type,
-		  __u64 *parsed_num_fields, __u64 *parsed_total_len,
+		  __u64 *parsed_num_entries, __u64 *parsed_total_len,
 		  const char **data_types, __u64 num_data_types)
 {
 	struct tlv_hdr *hdr;
@@ -290,7 +295,7 @@ int tlv_parse_hdr(const __u8 **data, size_t *data_len, __u64 *parsed_data_type,
 		return -EBADMSG;
 	}
 
-	*parsed_num_fields = __be64_to_cpu(hdr->num_fields);
+	*parsed_num_entries = __be64_to_cpu(hdr->num_entries);
 
 	if (hdr->_reserved != 0) {
 		pr_debug("_reserved must be zero\n");
@@ -304,25 +309,27 @@ int tlv_parse_hdr(const __u8 **data, size_t *data_len, __u64 *parsed_data_type,
 		return -EBADMSG;
 	}
 
-	pr_debug("Header: type: %s, num fields: %llu, total len: %llu\n",
-		 data_types[*parsed_data_type], *parsed_num_fields,
+	pr_debug("Header: type: %s, num entries: %llu, total len: %lld\n",
+		 data_types[*parsed_data_type], *parsed_num_entries,
 		 *parsed_total_len);
 
 	return 0;
 }
 
 /**
- * tlv_parse_data - Parse a TLV data
- * @callback: Callback function to call to parse the fields
+ * tlv_parse_data - Parse TLV data
+ * @callback: Callback function to call to parse the entries
  * @callback_data: Opaque data to supply to the callback function
- * @parsed_num_fields: Parsed data fields
+ * @num_entries: Number of data entries to parse
  * @data: Data to parse
  * @data_len: Length of @data
  * @fields: Array of field strings
  * @num_fields: Number of elements of @fields
  *
  * Parse the data part of the TLV data format and call the supplied callback
- * function for each data field, passing also the opaque data pointer.
+ * function for each data entry, passing also the opaque data pointer.
+ *
+ * The callback function decides how to process data depending on the field.
  *
  * Return: Zero on success, a negative value on error.
  */
@@ -330,28 +337,27 @@ int tlv_parse_hdr(const __u8 **data, size_t *data_len, __u64 *parsed_data_type,
   @ assigns \nothing;
  */
 int tlv_parse_data(parse_callback callback, void *callback_data,
-		   __u64 parsed_num_fields, const __u8 *data, size_t data_len,
+		   __u64 num_entries, const __u8 *data, size_t data_len,
 		   const char **fields, __u64 num_fields)
 {
 	const __u8 *data_ptr = data;
-	struct tlv_entry *entry;
-	__u64 parsed_field;
-	__u64 len, i, max_parsed_num_fields;
+	struct tlv_data_entry *entry;
+	__u64 parsed_field, len, i, max_num_entries;
 	int ret;
 
-	max_parsed_num_fields = data_len / sizeof(*entry);
+	max_num_entries = data_len / sizeof(*entry);
 
-	/* Finite termination on parsed_num_fields. */
-	if (parsed_num_fields > max_parsed_num_fields)
+	/* Finite termination on num_entries. */
+	if (num_entries > max_num_entries)
 		return -EBADMSG;
 
 	//@ dynamic_split data_len;
-	for (i = 0; i < parsed_num_fields; i++) {
+	for (i = 0; i < num_entries; i++) {
 		if (data_len < sizeof(*entry))
 			return -EBADMSG;
 
 		//@ assert \valid_read(data_ptr+(0..sizeof(*entry) - 1));
-		entry = (struct tlv_entry *)data_ptr;
+		entry = (struct tlv_data_entry *)data_ptr;
 		data_ptr += sizeof(*entry);
 		data_len -= sizeof(*entry);
 
@@ -389,7 +395,7 @@ int tlv_parse_data(parse_callback callback, void *callback_data,
 	}
 
 	if (data_len) {
-		pr_debug("Excess data: %ld bytes\n", data_len);
+		pr_debug("Excess data: %lu bytes\n", data_len);
 		return -EBADMSG;
 	}
 
@@ -401,7 +407,7 @@ int tlv_parse_data(parse_callback callback, void *callback_data,
 /**
  * tlv_parse - Parse data in TLV format
  * @expected_data_type: Desired data type
- * @callback: Callback function to call to parse the fields
+ * @callback: Callback function to call to parse the data entries
  * @callback_data: Opaque data to supply to the callback function
  * @data: Data to parse
  * @data_len: Length of @data
@@ -410,8 +416,8 @@ int tlv_parse_data(parse_callback callback, void *callback_data,
  * @fields: Array of field strings
  * @num_fields: Number of elements of @fields
  *
- * Parse data in TLV format and call the supplied callback function for each
- * data field, passing also the opaque data pointer.
+ * Parse data in TLV format and call tlv_parse_data() each time the header has
+ * the same data type as the expected one.
  *
  * Return: Zero on success, a negative value on error.
  */
@@ -421,17 +427,15 @@ int tlv_parse(__u64 expected_data_type, parse_callback callback,
 	      const char **data_types, __u64 num_data_types,
 	      const char **fields, __u64 num_fields)
 {
-	__u64 parsed_data_type;
-	__u64 parsed_num_fields;
-	__u64 parsed_total_len;
+	__u64 parsed_data_type, parsed_num_entries, parsed_total_len;
 	int ret = 0;
 
-	pr_debug("Start parsing data blob, size: %ld, expected data type: %s\n",
+	pr_debug("Start parsing data blob, size: %lu, expected data type: %s\n",
 		 data_len, data_types[expected_data_type]);
 
 	while (data_len) {
 		ret = tlv_parse_hdr(&data, &data_len, &parsed_data_type,
-				    &parsed_num_fields, &parsed_total_len,
+				    &parsed_num_entries, &parsed_total_len,
 				    data_types, num_data_types);
 		if (ret < 0)
 			goto out;
@@ -454,7 +458,7 @@ int tlv_parse(__u64 expected_data_type, parse_callback callback,
 		goto out;
 	}
 
-	ret = tlv_parse_data(callback, callback_data, parsed_num_fields, data,
+	ret = tlv_parse_data(callback, callback_data, parsed_num_entries, data,
 			     parsed_total_len, fields, num_fields);
 out:
 	pr_debug("End of parsing data blob, ret: %d\n", ret);
@@ -466,110 +470,173 @@ const char *digest_list_types_str[] = {
 };
 
 const char *digest_list_fields_str[] = {
-	FOR_EACH_FIELD(GENERATE_STRING)
+	FOR_EACH_DIGEST_LIST_FIELD(GENERATE_STRING)
 };
 
-const char *entry_fields_str[] = {
-	FOR_EACH_ENTRY_FIELD(GENERATE_STRING)
+const char *digest_list_entry_types_str[] = {
+	FOR_EACH_DIGEST_LIST_ENTRY_TYPE(GENERATE_STRING)
 };
 
-static int parse_digest_list_algo(struct digest_cache *digest_cache,
+const char *digest_list_entry_fields_str[] = {
+	FOR_EACH_DIGEST_LIST_ENTRY_FIELD(GENERATE_STRING)
+};
+
+struct tlv_callback_data {
+	u64 parsed_data_type;
+	u64 parsed_num_entries;
+	u64 parsed_total_len;
+	enum hash_algo algo;
+};
+
+/**
+ * parse_digest_list_algo - Parse DIGEST_LIST_ALGO field
+ * @tlv_data: Parser callback data
+ * @field: Field identifier
+ * @field_data: Field data
+ * @field_data_len: Length of @field_data
+ *
+ * This function parses the DIGEST_LIST_ALGO field (digest algorithm).
+ *
+ * Return: Zero on success, a POSIX error code otherwise.
+ */
+//@ requires \valid_read(field_data+(0..field_data_len - 1)) && \valid(tlv_data);
+static int parse_digest_list_algo(struct tlv_callback_data *tlv_data,
 				  enum digest_list_fields field,
-				  const __u8 *field_data, __u64 field_data_len)
+				  const u8 *field_data, u64 field_data_len)
 {
-	__u8 algo;
+	u64 algo;
 	int ret = 0;
 
 	kenter(",%u,%llu", field, field_data_len);
 
-	if (digest_cache->algo != HASH_ALGO__LAST) {
-		pr_debug("Digest algorithm already set to %s\n",
-			 hash_algo_name[digest_cache->algo]);
-		ret = -EBADMSG;
-		goto out;
-	}
-
-	if (field_data_len != sizeof(__u8)) {
+	if (field_data_len != sizeof(u64)) {
 		pr_debug("Unexpected data length %llu, expected %lu\n",
-			 field_data_len, sizeof(__u8));
+			 field_data_len, sizeof(u64));
 		ret = -EBADMSG;
 		goto out;
 	}
 
-	algo = *field_data;
+	algo = __be64_to_cpu(*(u64 *)field_data);
 
 	if (algo >= HASH_ALGO__LAST) {
-		pr_debug("Unexpected digest algo %u\n", algo);
+		pr_debug("Unexpected digest algo %llu\n", algo);
 		ret = -EBADMSG;
 		goto out;
 	}
 
-	digest_cache->algo = algo;
+	tlv_data->algo = algo;
 	pr_debug("Digest algo: %s\n", hash_algo_name[algo]);
 out:
 	kleave(" = %d", ret);
 	return ret;
 }
 
-//@ requires \valid_read(field_data+(0..field_data_len - 1)) && \valid(digest_cache);
-static int parse_entry_digest(struct digest_cache *digest_cache,
-			      enum entry_fields field, const __u8 *field_data,
-			      __u64 field_data_len)
+/**
+ * parse_digest_list_entry_digest - Parse DIGEST_LIST_ENTRY_DIGEST field
+ * @tlv_data: Parser callback data
+ * @field: Field identifier
+ * @field_data: Field data
+ * @field_data_len: Length of @field_data
+ *
+ * This function parses the DIGEST_LIST_ENTRY_DIGEST field (file digest).
+ *
+ * Return: Zero on success, a POSIX error code otherwise.
+ */
+//@ requires \valid_read(field_data+(0..field_data_len - 1)) && \valid(tlv_data);
+static int parse_digest_list_entry_digest(struct tlv_callback_data *tlv_data,
+					  enum digest_list_entry_fields field,
+					  const u8 *field_data,
+					  u64 field_data_len)
 {
 	int ret = 0, i;
 
 	kenter(",%u,%llu", field, field_data_len);
 
-	if (field_data_len != (__u64)hash_digest_size[digest_cache->algo]) {
+	if (tlv_data->algo == HASH_ALGO__LAST) {
+		pr_debug("Digest algo not set\n");
+		ret = -EBADMSG;
+		goto out;
+	}
+
+	if (field_data_len != hash_digest_size[tlv_data->algo]) {
 		pr_debug("Unexpected data length %llu, expected %d\n",
-			 field_data_len, hash_digest_size[digest_cache->algo]);
+			 field_data_len, hash_digest_size[tlv_data->algo]);
 		ret = -EBADMSG;
 		goto out;
 	}
 
 	//@ assert !valid_buffer || field_data[0] == 'A';
 
-	printf("%s:", hash_algo_name[digest_cache->algo]);
-
-	//@ loop unroll hash_digest_size[digest_cache->algo];
-	for (i = 0; i < hash_digest_size[digest_cache->algo]; i++)
+	//@ loop unroll hash_digest_size[tlv_data->algo];
+	for (i = 0; i < hash_digest_size[tlv_data->algo]; i++)
 		printf("%02x", (unsigned int)field_data[i]);
 out:
 	kleave(" = %d", ret);
 	return ret;
 }
 
+/**
+ * parse_digest_list_entry_path - Parse DIGEST_LIST_ENTRY_PATH field
+ * @tlv_data: Parser callback data
+ * @field: Field identifier
+ * @field_data: Field data
+ * @field_data_len: Length of @field_data
+ *
+ * This function handles the DIGEST_LIST_ENTRY_PATH field (file path). It
+ * currently does not parse the data.
+ *
+ * Return: Zero on success, a POSIX error code otherwise.
+ */
 //@ requires \valid_read(field_data+(0..field_data_len - 1));
-static int parse_entry_path(struct digest_cache *digest_cache,
-			    enum entry_fields field, const __u8 *field_data,
-			    __u64 field_data_len)
+static int parse_digest_list_entry_path(struct tlv_callback_data *tlv_data,
+					enum digest_list_entry_fields field,
+					const u8 *field_data,
+					u64 field_data_len)
 {
 	//@ assert !valid_buffer || field_data[0] == 'B';
+	kenter(",%u,%llu", field, field_data_len);
 
 	printf(" %.*s\n", (int)field_data_len, field_data);
+
+	kleave(" = 0");
 	return 0;
 }
 
+/**
+ * digest_list_entry_data_callback - DIGEST_LIST_ENTRY_DATA callback
+ * @callback_data: Callback data
+ * @field: Field identifier
+ * @field_data: Field data
+ * @field_data_len: Length of @field_data
+ *
+ * This callback handles the fields of DIGEST_LIST_ENTRY_DATA (nested) data,
+ * and calls the appropriate parser.
+ *
+ * Return: Zero on success, a POSIX error code otherwise.
+ */
 //@ requires \valid_read(field_data+(0..field_data_len - 1));
-static int entry_callback(void *callback_data, __u64 field,
-			  const __u8 *field_data, __u64 field_data_len)
+static int digest_list_entry_data_callback(void *callback_data, u64 field,
+					   const u8 *field_data,
+					   u64 field_data_len)
 {
-	struct digest_cache *digest_cache;
+	struct tlv_callback_data *tlv_data;
 	int ret;
 
-	digest_cache = (struct digest_cache *)callback_data;
+	tlv_data = (struct tlv_callback_data *)callback_data;
 
 	switch (field) {
-	case ENTRY_DIGEST:
-		ret = parse_entry_digest(digest_cache, field, field_data,
-					 field_data_len);
+	case DIGEST_LIST_ENTRY_DIGEST:
+		ret = parse_digest_list_entry_digest(tlv_data, field,
+						     field_data,
+						     field_data_len);
 		break;
-	case ENTRY_PATH:
-		ret = parse_entry_path(digest_cache, field, field_data,
-				       field_data_len);
+	case DIGEST_LIST_ENTRY_PATH:
+		ret = parse_digest_list_entry_path(tlv_data, field, field_data,
+						   field_data_len);
 		break;
 	default:
-		pr_debug("Unhandled field %s\n", entry_fields_str[field]);
+		pr_debug("Unhandled field %s\n",
+			 digest_list_entry_fields_str[field]);
 		/* Just ignore non-relevant fields. */
 		ret = 0;
 		break;
@@ -578,39 +645,64 @@ static int entry_callback(void *callback_data, __u64 field,
 	return ret;
 }
 
+/**
+ * parse_digest_list_entry - Parse DIGEST_LIST_ENTRY field
+ * @tlv_data: Parser callback data
+ * @field: Field identifier
+ * @field_data: Field data
+ * @field_data_len: Length of @field_data
+ *
+ * This function parses the DIGEST_LIST_ENTRY field.
+ *
+ * Return: Zero on success, a POSIX error code otherwise.
+ */
 //@ requires \valid_read(field_data+(0..field_data_len - 1));
-static int parse_digest_list_entry(struct digest_cache *digest_cache,
+static int parse_digest_list_entry(struct tlv_callback_data *tlv_data,
 				   enum digest_list_fields field,
-				   const __u8 *field_data, __u64 field_data_len)
+				   const u8 *field_data, u64 field_data_len)
 {
 	int ret;
 
 	kenter(",%u,%llu", field, field_data_len);
 
-	ret = tlv_parse(DIGEST_LIST_FILE, entry_callback, digest_cache,
-			field_data, field_data_len, digest_list_types_str,
-			DIGEST_LIST__LAST, entry_fields_str, ENTRY__LAST);
+	ret = tlv_parse(DIGEST_LIST_ENTRY_DATA, digest_list_entry_data_callback,
+			tlv_data, field_data, field_data_len,
+			digest_list_entry_types_str, DIGEST_LIST_ENTRY__LAST,
+			digest_list_entry_fields_str,
+			DIGEST_LIST_ENTRY_FIELD__LAST);
 
 	kleave(" = %d", ret);
 	return ret;
 }
 
+/**
+ * digest_list_file_callback - DIGEST_LIST_FILE callback
+ * @callback_data: Callback data
+ * @field: Field identifier
+ * @field_data: Field data
+ * @field_data_len: Length of @field_data
+ *
+ * This callback handles the fields of DIGEST_LIST_FILE data, and calls the
+ * appropriate parser.
+ *
+ * Return: Zero on success, a POSIX error code otherwise.
+ */
 //@ requires \valid_read(field_data+(0..field_data_len - 1));
-static int digest_list_callback(void *callback_data, __u64 field,
-				const __u8 *field_data, __u64 field_data_len)
+static int digest_list_file_callback(void *callback_data, u64 field,
+				     const u8 *field_data, u64 field_data_len)
 {
-	struct digest_cache *digest_cache;
+	struct tlv_callback_data *tlv_data;
 	int ret;
 
-	digest_cache = (struct digest_cache *)callback_data;
+	tlv_data = (struct tlv_callback_data *)callback_data;
 
 	switch (field) {
 	case DIGEST_LIST_ALGO:
-		ret = parse_digest_list_algo(digest_cache, field, field_data,
+		ret = parse_digest_list_algo(tlv_data, field, field_data,
 					     field_data_len);
 		break;
 	case DIGEST_LIST_ENTRY:
-		ret = parse_digest_list_entry(digest_cache, field, field_data,
+		ret = parse_digest_list_entry(tlv_data, field, field_data,
 					      field_data_len);
 		break;
 	default:
@@ -624,6 +716,15 @@ static int digest_list_callback(void *callback_data, __u64 field,
 	return ret;
 }
 
+/**
+ * digest_list_parse_tlv - Parse a tlv digest list
+ * @data: Data to parse
+ * @data_len: Length of @data
+ *
+ * This function parses a tlv digest list.
+ *
+ * Return: Zero on success, a POSIX error code otherwise.
+ */
 /*@ requires \valid_read(data+(0..data_len-1)) && \initialized(data+(0..data_len-1));
   @ behavior valid_data:
   @   assumes valid_buffer == true;
@@ -634,39 +735,39 @@ static int digest_list_callback(void *callback_data, __u64 field,
   @ complete behaviors valid_data, unknown_data;
   @ disjoint behaviors valid_data, unknown_data;
  */
-int digest_list_parse_tlv(struct digest_cache *digest_cache, const __u8 *data,
-			  size_t data_len)
+int digest_list_parse_tlv(const u8 *data, size_t data_len)
 {
-	__u64 parsed_data_type;
-	__u64 parsed_num_fields;
-	__u64 parsed_total_len;
+	struct tlv_callback_data tlv_data = {
+		.algo = HASH_ALGO__LAST,
+	};
 	int ret;
 
-	ret = tlv_parse_hdr(&data, &data_len, &parsed_data_type,
-			    &parsed_num_fields, &parsed_total_len,
+	ret = tlv_parse_hdr(&data, &data_len, &tlv_data.parsed_data_type,
+			    &tlv_data.parsed_num_entries,
+			    &tlv_data.parsed_total_len,
 			    digest_list_types_str, DIGEST_LIST__LAST);
 	if (ret < 0)
 		return ret;
 
-	if (parsed_data_type != DIGEST_LIST_FILE)
+	if (tlv_data.parsed_data_type != DIGEST_LIST_FILE)
 		return 0;
 
-	return tlv_parse_data(digest_list_callback, digest_cache,
-			      parsed_num_fields, data, data_len,
-			      digest_list_fields_str, FIELD__LAST);
+	return tlv_parse_data(digest_list_file_callback, &tlv_data,
+			      tlv_data.parsed_num_entries, data, data_len,
+			      digest_list_fields_str, DIGEST_LIST_FIELD__LAST);
 }
+
 
 void digest_list_gen_tlv_deterministic(void)
 {
-	struct digest_cache digest_cache = { .algo = HASH_ALGO__LAST };
 	unsigned char a[LENGTH_DETERM], *a_ptr = a;
 	struct tlv_hdr *outer_hdr = (struct tlv_hdr *)a;
 	struct tlv_hdr *inner_hdr;
-	struct tlv_entry *outer_entry, *inner_entry;
-	__u64 outer_num_fields, inner_num_fields, digest_len;
+	struct tlv_data_entry *outer_entry, *inner_entry;
+	__u64 outer_num_entries, inner_num_entries, digest_len;
 	__u64 path_len;
 	__u64 i;
-	__u8 algo;
+	__u64 algo;
 	int ret;
 
 	memset(a, 0, sizeof(a));
@@ -677,10 +778,10 @@ void digest_list_gen_tlv_deterministic(void)
 	digest_len = hash_digest_size[algo];
 
 	outer_hdr->data_type = __cpu_to_be64(DIGEST_LIST_FILE);
-	outer_num_fields = Frama_C_int_interval(1, 3);
-	//@ split outer_num_fields;
+	outer_num_entries = Frama_C_int_interval(1, 3);
+	//@ split outer_num_entries;
 
-	outer_hdr->num_fields = __cpu_to_be64(outer_num_fields);
+	outer_hdr->num_entries = __cpu_to_be64(outer_num_entries);
 	outer_hdr->total_len = 0;
 
 	a_ptr += sizeof(*outer_hdr);
@@ -689,15 +790,15 @@ void digest_list_gen_tlv_deterministic(void)
 	a_ptr += sizeof(*outer_entry);
 
 	outer_entry->field = __cpu_to_be64(DIGEST_LIST_ALGO);
-	outer_entry->length = __cpu_to_be64(sizeof(__u8));
-	outer_entry->data[0] = algo;
+	outer_entry->length = __cpu_to_be64(sizeof(__u64));
+	*(u64 *)outer_entry->data = __cpu_to_be64(algo);
 
-	a_ptr++;
+	a_ptr += sizeof(__u64);
 
-	outer_hdr->total_len += sizeof(*outer_entry) + sizeof(__u8);
+	outer_hdr->total_len += sizeof(*outer_entry) + sizeof(__u64);
 
-	//@ loop unroll outer_num_fields;
-	for (i = 1; i < outer_num_fields; i++) {
+	//@ loop unroll outer_num_entries;
+	for (i = 1; i < outer_num_entries; i++) {
 		outer_entry = (struct tlv_entry *)a_ptr;
 		a_ptr += sizeof(*outer_entry);
 
@@ -705,25 +806,25 @@ void digest_list_gen_tlv_deterministic(void)
 		inner_hdr = (struct tlv_hdr *)a_ptr;
 		a_ptr += sizeof(*inner_hdr);
 
-		inner_hdr->data_type = __cpu_to_be64(DIGEST_LIST_FILE);
-		inner_num_fields = Frama_C_int_interval(1, 2);
-		//@ split inner_num_fields;
+		inner_hdr->data_type = __cpu_to_be64(DIGEST_LIST_ENTRY_DATA);
+		inner_num_entries = Frama_C_int_interval(1, 2);
+		//@ split inner_num_entries;
 
-		inner_hdr->num_fields = __cpu_to_be64(inner_num_fields);
+		inner_hdr->num_entries = __cpu_to_be64(inner_num_entries);
 		inner_entry = (struct tlv_entry *)(inner_hdr + 1);
 		a_ptr += sizeof(*inner_entry) + digest_len;
 
-		inner_entry->field = __cpu_to_be64(ENTRY_DIGEST);
+		inner_entry->field = __cpu_to_be64(DIGEST_LIST_ENTRY_DIGEST);
 		inner_entry->length = __cpu_to_be64(digest_len);
 		memset(inner_entry->data, 'A', digest_len);
 
 		inner_hdr->total_len = sizeof(*inner_entry) + digest_len;
 
-		if (inner_num_fields == 2) {
+		if (inner_num_entries == 2) {
 			inner_entry = (struct tlv_entry *)a_ptr;
 			a_ptr += sizeof(*inner_entry);
 
-			inner_entry->field = __cpu_to_be64(ENTRY_PATH);
+			inner_entry->field = __cpu_to_be64(DIGEST_LIST_ENTRY_PATH);
 			path_len = Frama_C_int_interval(10, 12);
 			//@ split path_len;
 
@@ -743,17 +844,16 @@ void digest_list_gen_tlv_deterministic(void)
 
 	outer_hdr->total_len = __cpu_to_be64(outer_hdr->total_len);
 
-	ret = digest_list_parse_tlv(&digest_cache, a, a_ptr - a);
+	ret = digest_list_parse_tlv(a, a_ptr - a);
 	//@ assert ret == 0;
 }
 
 void digest_list_gen_tlv_non_deterministic(void)
 {
-	struct digest_cache digest_cache = { 0 };
 	unsigned char a[LENGTH_NON_DETERM];
 
 	Frama_C_make_unknown((char *)a, LENGTH_NON_DETERM);
-	digest_list_parse_tlv(&digest_cache, a, LENGTH_NON_DETERM);
+	digest_list_parse_tlv(a, LENGTH_NON_DETERM);
 }
 
 #ifdef TEST
@@ -790,7 +890,7 @@ int main(void)
 #else
 int main(int argc, char *argv[])
 {
-	struct digest_cache digest_cache = { .algo = HASH_ALGO__LAST };
+	struct tlv_callback_data = { .algo = HASH_ALGO__LAST };
 	unsigned char *data;
 	size_t data_len;
 	int ret;
@@ -802,7 +902,7 @@ int main(int argc, char *argv[])
 	if (ret < 0)
 		return ret;
 
-	ret = digest_list_parse_tlv(&digest_cache, data, data_len);
+	ret = digest_list_parse_tlv(&tlv_callback_data, data, data_len);
 	munmap(data, data_len);
 
 	return ret;
