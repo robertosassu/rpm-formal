@@ -386,7 +386,7 @@ int tlv_parse_data(parse_callback callback, void *callback_data,
 		if (ret < 0) {
 			pr_debug("Parsing of field %s failed, ret: %d\n",
 				 fields[parsed_field], ret);
-			return -EBADMSG;
+			return ret;
 		}
 
 		data_ptr += len;
