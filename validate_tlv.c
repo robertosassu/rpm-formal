@@ -470,11 +470,6 @@ int tlv_parse(__u64 expected_data_type, parse_callback callback,
 	}
 
 	//@ merge data_len;
-
-	if (data_len) {
-		pr_debug("Excess data length %lu\n", data_len);
-		ret = -EINVAL;
-	}
 out:
 	pr_debug("End of parsing data blob, ret: %d\n", ret);
 	return ret;
