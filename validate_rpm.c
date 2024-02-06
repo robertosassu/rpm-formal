@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * Copyright (C) 2023 Huawei Technologies Duesseldorf GmbH
+ * Copyright (C) 2023-2024 Huawei Technologies Duesseldorf GmbH
  *
  * Author: Roberto Sassu <roberto.sassu@huawei.com>
  *
