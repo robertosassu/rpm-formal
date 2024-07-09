@@ -301,9 +301,6 @@ int digest_list_parse_rpm(struct digest_cache *digest_cache, const u8 *data,
 	//@ dynamic_split digests_offset_set;
 	//@ dynamic_split data_len;
 	for (i = 0; i < tags; i++) {
-		if (data_len < sizeof(*entry))
-			return -EINVAL;
-
 		entry = (const struct rpm_entryinfo *)data;
 		data += sizeof(*entry);
 		data_len -= sizeof(*entry);
