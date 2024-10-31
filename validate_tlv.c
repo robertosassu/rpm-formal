@@ -19,10 +19,10 @@
 #ifndef __FRAMAC__
 #include <asm/byteorder.h>
 #else
+#define __cpu_to_be16(x) x
 #define __cpu_to_be32(x) x
+#define __be16_to_cpu(x) x
 #define __be32_to_cpu(x) x
-#define __cpu_to_be64(x) x
-#define __be64_to_cpu(x) x
 #endif
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -32,12 +32,6 @@
 #include <ctype.h>
 #include <string.h>
 #include <linux/types.h>
-
-typedef __u8 u8;
-typedef __u16 u16;
-typedef __u32 u32;
-typedef __s32 s32;
-typedef __u64 u64;
 
 #ifdef __FRAMAC__
 #include "__fc_builtin.h"
@@ -108,12 +102,12 @@ static int Frama_C_int_interval(int low, int high)
 #define STREEBOG512_DIGEST_SIZE	64
 
 #define LENGTH_DETERM 5000
-#define LENGTH_NON_DETERM 140
+#define LENGTH_NON_DETERM 100
 
-typedef int (*hdr_callback)(void *callback_data, __u64 data_type,
-			    __u64 num_entries, __u64 total_len);
-typedef int (*data_callback)(void *callback_data, __u64 field,
-			     const __u8 *field_data, __u64 field_len);
+typedef int (*hdr_callback)(void *callback_data, __u16 data_type,
+			    __u32 num_entries, __u32 total_len);
+typedef int (*data_callback)(void *callback_data, __u16 field,
+			     const __u8 *field_data, __u32 field_len);
 
 /**
  * enum digest_list_types - Types of digest list
@@ -154,17 +148,17 @@ enum digest_list_entry_fields {
 /**
  * struct tlv_hdr - Header of TLV format
  * @data_type: Type of data to parse
- * @num_entries: Number of data entries provided
  * @_reserved: Reserved for future use (must be equal to zero)
+ * @num_entries: Number of data entries provided
  * @total_len: Total length of the data blob, excluding the header
  *
  * This structure represents the header of the TLV data format.
  */
 struct tlv_hdr {
-	__u64 data_type;
-	__u64 num_entries;
-	__u64 _reserved;
-	__u64 total_len;
+	__u16 data_type;
+	__u16 _reserved;
+	__u32 num_entries;
+	__u32 total_len;
 } __attribute__((packed));
 
 /**
@@ -176,10 +170,13 @@ struct tlv_hdr {
  * This structure represents a TLV entry of the data part of TLV data format.
  */
 struct tlv_data_entry {
-	__u64 field;
-	__u64 length;
+	__u16 field;
+	__u32 length;
 	__u8 data[];
 } __attribute__((packed));
+
+struct digest_cache {
+};
 
 enum hash_algo {
 	HASH_ALGO_MD4,
@@ -270,19 +267,20 @@ bool valid_buffer = false;
  *
  * Return: Zero on success, a negative value on error.
  */
-/*@ requires \valid_read(*data+(0..*data_len-1)) && \initialized(*data+(0..*data_len-1)) && \valid(parsed_data_type) && \valid(parsed_num_entries) && \valid(parsed_total_len) && \valid_read(data_types);
+/*@ requires \valid_read(*data+(0..*data_len-1)) && \initialized(*data+(0..*data_len-1)) && \valid(parsed_num_entries) && \valid(parsed_total_len) && \valid_read(data_types);
   @ assigns *data, *data_len, *parsed_num_entries, *parsed_total_len;
   @ ensures \valid_read(*data+(0..*data_len-1));
  */
-static int tlv_parse_hdr(const __u8 **data, size_t *data_len,
-			 __u64 *parsed_data_type, __u64 *parsed_num_entries,
-			 __u64 *parsed_total_len, const char **data_types,
-			 __u64 num_data_types)
+static int tlv_parse_hdr(hdr_callback hdr_callback, void *hdr_callback_data,
+			 const __u8 **data, size_t *data_len,
+			 __u32 *parsed_num_entries, __u32 *parsed_total_len,
+			 const char **data_types, __u16 num_data_types)
 {
+	__u16 parsed_data_type;
 	struct tlv_hdr *hdr;
 
 	if (*data_len < sizeof(*hdr)) {
-		pr_debug("Data blob too short, %lu bytes, expected %lu\n",
+		pr_debug("Data blob too short, %zu bytes, expected %lu\n",
 			 *data_len, sizeof(*hdr));
 		return -EBADMSG;
 	}
@@ -292,32 +290,33 @@ static int tlv_parse_hdr(const __u8 **data, size_t *data_len,
 	*data += sizeof(*hdr);
 	*data_len -= sizeof(*hdr);
 
-	*parsed_data_type = __be64_to_cpu(hdr->data_type);
-	if (*parsed_data_type >= num_data_types) {
-		pr_debug("Invalid data type %llu, max: %llu\n",
-			 *parsed_data_type, num_data_types - 1);
+	parsed_data_type = __be16_to_cpu(hdr->data_type);
+	if (parsed_data_type >= num_data_types) {
+		pr_debug("Invalid data type %u, max: %u\n",
+			 parsed_data_type, num_data_types - 1);
 		return -EBADMSG;
 	}
 
-	*parsed_num_entries = __be64_to_cpu(hdr->num_entries);
+	*parsed_num_entries = __be32_to_cpu(hdr->num_entries);
 
 	if (hdr->_reserved != 0) {
 		pr_debug("_reserved must be zero\n");
 		return -EBADMSG;
 	}
 
-	*parsed_total_len = __be64_to_cpu(hdr->total_len);
+	*parsed_total_len = __be32_to_cpu(hdr->total_len);
 	if (*parsed_total_len > *data_len) {
-		pr_debug("Invalid total length %llu, expected: %lu\n",
+		pr_debug("Invalid total length %u, expected: %zu\n",
 			 *parsed_total_len, *data_len);
 		return -EBADMSG;
 	}
 
-	pr_debug("Header: type: %s, num entries: %llu, total len: %lld\n",
-		 data_types[*parsed_data_type], *parsed_num_entries,
+	pr_debug("Header: type: %s, num entries: %u, total len: %d\n",
+		 data_types[parsed_data_type], *parsed_num_entries,
 		 *parsed_total_len);
 
-	return 0;
+	return hdr_callback(hdr_callback_data, parsed_data_type,
+			    *parsed_num_entries, *parsed_total_len);
 }
 
 /**
@@ -341,12 +340,13 @@ static int tlv_parse_hdr(const __u8 **data, size_t *data_len,
   @ assigns \nothing;
  */
 static int tlv_parse_data(data_callback data_callback, void *data_callback_data,
-			  __u64 num_entries, const __u8 *data, size_t data_len,
-			  const char **fields, __u64 num_fields)
+			  __u32 num_entries, const __u8 *data, size_t data_len,
+			  const char **fields, __u32 num_fields)
 {
 	const __u8 *data_ptr = data;
 	struct tlv_data_entry *entry;
-	__u64 parsed_field, len, i, max_num_entries;
+	__u16 parsed_field;
+	__u32 len, i, max_num_entries;
 	int ret;
 
 	max_num_entries = data_len / sizeof(*entry);
@@ -355,7 +355,6 @@ static int tlv_parse_data(data_callback data_callback, void *data_callback_data,
 	if (num_entries > max_num_entries)
 		return -EBADMSG;
 
-	//@ dynamic_split data_len;
 	for (i = 0; i < num_entries; i++) {
 		if (data_len < sizeof(*entry))
 			return -EBADMSG;
@@ -365,19 +364,19 @@ static int tlv_parse_data(data_callback data_callback, void *data_callback_data,
 		data_ptr += sizeof(*entry);
 		data_len -= sizeof(*entry);
 
-		parsed_field = __be64_to_cpu(entry->field);
+		parsed_field = __be16_to_cpu(entry->field);
 		if (parsed_field >= num_fields) {
-			pr_debug("Invalid field %llu, max: %llu\n",
+			pr_debug("Invalid field %u, max: %u\n",
 				 parsed_field, num_fields - 1);
 			return -EBADMSG;
 		}
 
-		len = __be64_to_cpu(entry->length);
+		len = __be32_to_cpu(entry->length);
 
 		if (data_len < len)
 			return -EBADMSG;
 
-		pr_debug("Data: field: %s, len: %llu\n", fields[parsed_field],
+		pr_debug("Data: field: %s, len: %u\n", fields[parsed_field],
 			 len);
 
 		if (!len)
@@ -400,11 +399,9 @@ static int tlv_parse_data(data_callback data_callback, void *data_callback_data,
 	}
 
 	if (data_len) {
-		pr_debug("Excess data: %lu bytes\n", data_len);
+		pr_debug("Excess data: %zu bytes\n", data_len);
 		return -EBADMSG;
 	}
-
-	//@ merge data_len;
 
 	return 0;
 }
@@ -431,26 +428,31 @@ static int tlv_parse_data(data_callback data_callback, void *data_callback_data,
 int tlv_parse(hdr_callback hdr_callback, void *hdr_callback_data,
 	      data_callback data_callback, void *data_callback_data,
 	      const __u8 *data, size_t data_len, const char **data_types,
-	      __u64 num_data_types, const char **fields, __u64 num_fields)
+	      __u16 num_data_types, const char **fields, __u32 num_fields)
 {
-	__u64 parsed_data_type, parsed_num_entries, parsed_total_len;
+	__u32 parsed_num_entries, parsed_total_len;
 	const __u8 *data_ptr = data;
 	int ret = 0;
 
-	pr_debug("Start parsing data blob, size: %lu\n", data_len);
+	pr_debug("Start parsing data blob, size: %zu\n", data_len);
+
+	if (data_len > UINT32_MAX) {
+		pr_debug("Data too big\n");
+		ret = -E2BIG;
+		goto out;
+	}
 
 	//@ dynamic_split data_len;
 	while (data_len) {
-		ret = tlv_parse_hdr(&data_ptr, &data_len, &parsed_data_type,
-				    &parsed_num_entries, &parsed_total_len,
-				    data_types, num_data_types);
+		ret = tlv_parse_hdr(hdr_callback, hdr_callback_data, &data_ptr,
+				    &data_len, &parsed_num_entries,
+				    &parsed_total_len, data_types,
+				    num_data_types);
+		/* It simplifies the partitioning of the values. */
 		if (ret < 0)
 			goto out;
 
 		//@ dynamic_split parsed_total_len;
-
-		ret = hdr_callback(hdr_callback_data, parsed_data_type,
-				   parsed_num_entries, parsed_total_len);
 		switch (ret) {
 		case 0:
 			/*
@@ -478,8 +480,9 @@ int tlv_parse(hdr_callback hdr_callback, void *hdr_callback_data,
 		//@ merge parsed_total_len;
 	}
 
-	//@ merge data_len;
 out:
+	//@ merge parsed_total_len;
+	//@ merge data_len;
 	pr_debug("End of parsing data blob, ret: %d\n", ret);
 	return ret;
 }
@@ -501,9 +504,7 @@ static const char * digest_list_entry_fields_str[] = {
 };
 
 struct tlv_callback_data {
-	u64 parsed_data_type;
-	u64 parsed_num_entries;
-	u64 parsed_total_len;
+	__u32 parsed_num_entries;
 	enum hash_algo algo;
 };
 
@@ -521,29 +522,30 @@ struct tlv_callback_data {
 //@ requires \valid_read(field_data+(0..field_data_len - 1)) && \valid(tlv_data);
 static int parse_digest_list_algo(struct tlv_callback_data *tlv_data,
 				  enum digest_list_fields field,
-				  const u8 *field_data, u64 field_data_len)
+				  const __u8 *field_data, __u32 field_data_len)
 {
-	u64 algo;
+	__u16 algo;
 	int ret = 0;
 
-	kenter(",%u,%llu", field, field_data_len);
+	kenter(",%u,%u", field, field_data_len);
 
-	if (field_data_len != sizeof(u64)) {
-		pr_debug("Unexpected data length %llu, expected %lu\n",
-			 field_data_len, sizeof(u64));
+	if (field_data_len != sizeof(__u16)) {
+		pr_debug("Unexpected data length %u, expected %zu\n",
+			 field_data_len, sizeof(__u16));
 		ret = -EBADMSG;
 		goto out;
 	}
 
-	algo = __be64_to_cpu(*(u64 *)field_data);
+	algo = __be16_to_cpu(*(__u16 *)field_data);
 
 	if (algo >= HASH_ALGO__LAST) {
-		pr_debug("Unexpected digest algo %llu\n", algo);
+		pr_debug("Unexpected digest algo %u\n", algo);
 		ret = -EBADMSG;
 		goto out;
 	}
 
 	tlv_data->algo = algo;
+
 	pr_debug("Digest algo: %s\n", hash_algo_name[algo]);
 out:
 	kleave(" = %d", ret);
@@ -564,12 +566,12 @@ out:
 //@ requires \valid_read(field_data+(0..field_data_len - 1)) && \valid(tlv_data);
 static int parse_digest_list_entry_digest(struct tlv_callback_data *tlv_data,
 					  enum digest_list_entry_fields field,
-					  const u8 *field_data,
-					  u64 field_data_len)
+					  const __u8 *field_data,
+					  __u32 field_data_len)
 {
 	int ret = 0, i;
 
-	kenter(",%u,%llu", field, field_data_len);
+	kenter(",%u,%u", field, field_data_len);
 
 	if (tlv_data->algo == HASH_ALGO__LAST) {
 		pr_debug("Digest algo not set\n");
@@ -578,7 +580,7 @@ static int parse_digest_list_entry_digest(struct tlv_callback_data *tlv_data,
 	}
 
 	if (field_data_len != hash_digest_size[tlv_data->algo]) {
-		pr_debug("Unexpected data length %llu, expected %d\n",
+		pr_debug("Unexpected data length %u, expected %d\n",
 			 field_data_len, hash_digest_size[tlv_data->algo]);
 		ret = -EBADMSG;
 		goto out;
@@ -609,11 +611,11 @@ out:
 //@ requires \valid_read(field_data+(0..field_data_len - 1));
 static int parse_digest_list_entry_path(struct tlv_callback_data *tlv_data,
 					enum digest_list_entry_fields field,
-					const u8 *field_data,
-					u64 field_data_len)
+					const __u8 *field_data,
+					__u32 field_data_len)
 {
 	//@ assert !valid_buffer || field_data[0] == 'B';
-	kenter(",%u,%llu", field, field_data_len);
+	kenter(",%u,%u", field, field_data_len);
 
 	printf(" %.*s\n", (int)field_data_len, field_data);
 
@@ -633,8 +635,8 @@ static int parse_digest_list_entry_path(struct tlv_callback_data *tlv_data,
  *
  * Return: 0 to skip processing the data, 1 to process the data.
  */
-static int digest_list_entry_hdr_callback(void *callback_data, u64 data_type,
-					  u64 num_entries, u64 total_len)
+static int digest_list_entry_hdr_callback(void *callback_data, __u16 data_type,
+					  __u32 num_entries, __u32 total_len)
 {
 	if (data_type != DIGEST_LIST_ENTRY_DATA)
 		return 0;
@@ -655,9 +657,9 @@ static int digest_list_entry_hdr_callback(void *callback_data, u64 data_type,
  * Return: Zero on success, a POSIX error code otherwise.
  */
 //@ requires \valid_read(field_data+(0..field_data_len - 1));
-static int digest_list_entry_data_callback(void *callback_data, u64 field,
-					   const u8 *field_data,
-					   u64 field_data_len)
+static int digest_list_entry_data_callback(void *callback_data, __u16 field,
+					   const __u8 *field_data,
+					   __u32 field_data_len)
 {
 	struct tlv_callback_data *tlv_data;
 	int ret;
@@ -699,11 +701,11 @@ static int digest_list_entry_data_callback(void *callback_data, u64 field,
 //@ requires \valid_read(field_data+(0..field_data_len - 1));
 static int parse_digest_list_entry(struct tlv_callback_data *tlv_data,
 				   enum digest_list_fields field,
-				   const u8 *field_data, u64 field_data_len)
+				   const __u8 *field_data, __u32 field_data_len)
 {
 	int ret;
 
-	kenter(",%u,%llu", field, field_data_len);
+	kenter(",%u,%u", field, field_data_len);
 
 	ret = tlv_parse(digest_list_entry_hdr_callback, NULL,
 			digest_list_entry_data_callback, tlv_data, field_data,
@@ -729,8 +731,8 @@ static int parse_digest_list_entry(struct tlv_callback_data *tlv_data,
  * Return: 0 to skip processing the data, 1 to process the data, a POSIX error
  *	   code otherwise.
  */
-static int digest_list_hdr_callback(void *callback_data, u64 data_type,
-				    u64 num_entries, u64 total_len)
+static int digest_list_hdr_callback(void *callback_data, __u16 data_type,
+				    __u32 num_entries, __u32 total_len)
 {
 	struct tlv_callback_data *tlv_data;
 
@@ -743,9 +745,7 @@ static int digest_list_hdr_callback(void *callback_data, u64 data_type,
 	if (tlv_data->parsed_num_entries)
 		return -EINVAL;
 
-	tlv_data->parsed_data_type = data_type;
 	tlv_data->parsed_num_entries = num_entries;
-	tlv_data->parsed_total_len = total_len;
 	return 1;
 }
 
@@ -762,8 +762,9 @@ static int digest_list_hdr_callback(void *callback_data, u64 data_type,
  * Return: Zero on success, a POSIX error code otherwise.
  */
 //@ requires \valid_read(field_data+(0..field_data_len - 1));
-static int digest_list_file_callback(void *callback_data, u64 field,
-				     const u8 *field_data, u64 field_data_len)
+static int digest_list_data_callback(void *callback_data, __u16 field,
+				     const __u8 *field_data,
+				     __u32 field_data_len)
 {
 	struct tlv_callback_data *tlv_data;
 	int ret;
@@ -809,17 +810,16 @@ static int digest_list_file_callback(void *callback_data, u64 field,
   @ complete behaviors valid_data, unknown_data;
   @ disjoint behaviors valid_data, unknown_data;
  */
-int digest_list_parse_tlv(const u8 *data, size_t data_len)
+static int digest_list_parse_tlv(struct digest_cache *digest_cache,
+				 const __u8 *data, size_t data_len)
 {
 	struct tlv_callback_data tlv_data = {
 		.algo = HASH_ALGO__LAST,
-		.parsed_data_type = DIGEST_LIST__LAST,
 		.parsed_num_entries = 0,
-		.parsed_total_len = 0,
 	};
 
 	return tlv_parse(digest_list_hdr_callback, &tlv_data,
-			 digest_list_file_callback, &tlv_data, data, data_len,
+			 digest_list_data_callback, &tlv_data, data, data_len,
 			 digest_list_types_str, DIGEST_LIST__LAST,
 			 digest_list_fields_str, DIGEST_LIST_FIELD__LAST);
 }
@@ -830,10 +830,10 @@ void digest_list_gen_tlv_deterministic(void)
 	struct tlv_hdr *outer_hdr = (struct tlv_hdr *)a;
 	struct tlv_hdr *inner_hdr;
 	struct tlv_data_entry *outer_entry, *inner_entry;
-	__u64 outer_num_entries, inner_num_entries, digest_len;
-	__u64 path_len;
-	__u64 i;
-	__u64 algo;
+	__u32 outer_num_entries, inner_num_entries, digest_len;
+	__u32 path_len;
+	__u32 i;
+	__u16 algo;
 	int ret;
 
 	memset(a, 0, sizeof(a));
@@ -843,11 +843,11 @@ void digest_list_gen_tlv_deterministic(void)
 
 	digest_len = hash_digest_size[algo];
 
-	outer_hdr->data_type = __cpu_to_be64(DIGEST_LIST_FILE);
+	outer_hdr->data_type = __cpu_to_be16(DIGEST_LIST_FILE);
 	outer_num_entries = Frama_C_int_interval(1, 3);
 	//@ split outer_num_entries;
 
-	outer_hdr->num_entries = __cpu_to_be64(outer_num_entries);
+	outer_hdr->num_entries = __cpu_to_be32(outer_num_entries);
 	outer_hdr->total_len = 0;
 
 	a_ptr += sizeof(*outer_hdr);
@@ -855,33 +855,33 @@ void digest_list_gen_tlv_deterministic(void)
 	outer_entry = (struct tlv_data_entry *)a_ptr;
 	a_ptr += sizeof(*outer_entry);
 
-	outer_entry->field = __cpu_to_be64(DIGEST_LIST_ALGO);
-	outer_entry->length = __cpu_to_be64(sizeof(__u64));
-	*(u64 *)outer_entry->data = __cpu_to_be64(algo);
+	outer_entry->field = __cpu_to_be16(DIGEST_LIST_ALGO);
+	outer_entry->length = __cpu_to_be32(sizeof(__u16));
+	*(__u16 *)outer_entry->data = __cpu_to_be16(algo);
 
-	a_ptr += sizeof(__u64);
+	a_ptr += sizeof(__u16);
 
-	outer_hdr->total_len += sizeof(*outer_entry) + sizeof(__u64);
+	outer_hdr->total_len += sizeof(*outer_entry) + sizeof(__u16);
 
 	//@ loop unroll outer_num_entries;
 	for (i = 1; i < outer_num_entries; i++) {
 		outer_entry = (struct tlv_data_entry *)a_ptr;
 		a_ptr += sizeof(*outer_entry);
 
-		outer_entry->field = __cpu_to_be64(DIGEST_LIST_ENTRY);
+		outer_entry->field = __cpu_to_be16(DIGEST_LIST_ENTRY);
 		inner_hdr = (struct tlv_hdr *)a_ptr;
 		a_ptr += sizeof(*inner_hdr);
 
-		inner_hdr->data_type = __cpu_to_be64(DIGEST_LIST_ENTRY_DATA);
+		inner_hdr->data_type = __cpu_to_be16(DIGEST_LIST_ENTRY_DATA);
 		inner_num_entries = Frama_C_int_interval(1, 2);
 		//@ split inner_num_entries;
 
-		inner_hdr->num_entries = __cpu_to_be64(inner_num_entries);
+		inner_hdr->num_entries = __cpu_to_be32(inner_num_entries);
 		inner_entry = (struct tlv_data_entry *)(inner_hdr + 1);
 		a_ptr += sizeof(*inner_entry) + digest_len;
 
-		inner_entry->field = __cpu_to_be64(DIGEST_LIST_ENTRY_DIGEST);
-		inner_entry->length = __cpu_to_be64(digest_len);
+		inner_entry->field = __cpu_to_be16(DIGEST_LIST_ENTRY_DIGEST);
+		inner_entry->length = __cpu_to_be32(digest_len);
 		memset(inner_entry->data, 'A', digest_len);
 
 		inner_hdr->total_len = sizeof(*inner_entry) + digest_len;
@@ -890,11 +890,11 @@ void digest_list_gen_tlv_deterministic(void)
 			inner_entry = (struct tlv_data_entry *)a_ptr;
 			a_ptr += sizeof(*inner_entry);
 
-			inner_entry->field = __cpu_to_be64(DIGEST_LIST_ENTRY_PATH);
+			inner_entry->field = __cpu_to_be16(DIGEST_LIST_ENTRY_PATH);
 			path_len = Frama_C_int_interval(10, 12);
 			//@ split path_len;
 
-			inner_entry->length = __cpu_to_be64(path_len);
+			inner_entry->length = __cpu_to_be32(path_len);
 
 			memset(inner_entry->data, 'B', path_len);
 			a_ptr += path_len;
@@ -904,13 +904,13 @@ void digest_list_gen_tlv_deterministic(void)
 
 		outer_entry->length = sizeof(*inner_hdr) + inner_hdr->total_len;
 		outer_hdr->total_len += sizeof(*outer_entry) + outer_entry->length;
-		inner_hdr->total_len = __cpu_to_be64(inner_hdr->total_len);
-		outer_entry->length  = __cpu_to_be64(outer_entry->length);
+		inner_hdr->total_len = __cpu_to_be32(inner_hdr->total_len);
+		outer_entry->length  = __cpu_to_be32(outer_entry->length);
 	}
 
-	outer_hdr->total_len = __cpu_to_be64(outer_hdr->total_len);
+	outer_hdr->total_len = __cpu_to_be32(outer_hdr->total_len);
 
-	ret = digest_list_parse_tlv(a, a_ptr - a);
+	ret = digest_list_parse_tlv(NULL, a, a_ptr - a);
 	//@ assert ret == 0;
 }
 
@@ -919,7 +919,7 @@ void digest_list_gen_tlv_non_deterministic(void)
 	unsigned char a[LENGTH_NON_DETERM];
 
 	Frama_C_make_unknown((char *)a, LENGTH_NON_DETERM);
-	digest_list_parse_tlv(a, LENGTH_NON_DETERM);
+	digest_list_parse_tlv(NULL, a, LENGTH_NON_DETERM);
 }
 
 #ifdef TEST
@@ -967,7 +967,7 @@ int main(int argc, char *argv[])
 	if (ret < 0)
 		return ret;
 
-	ret = digest_list_parse_tlv( data, data_len);
+	ret = digest_list_parse_tlv(NULL, data, data_len);
 	munmap(data, data_len);
 
 	return ret;
