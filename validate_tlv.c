@@ -59,24 +59,16 @@ static int Frama_C_int_interval(int low, int high)
 #define kleave(FMT, ...) \
 	pr_debug("<== %s()"FMT"\n", __func__, ##__VA_ARGS__)
 
-#define FOR_EACH_DIGEST_LIST_TYPE(DIGEST_LIST_TYPE) \
-	DIGEST_LIST_TYPE(DIGEST_LIST_FILE) \
-	DIGEST_LIST_TYPE(DIGEST_LIST__LAST)
-
 #define FOR_EACH_DIGEST_LIST_FIELD(DIGEST_LIST_FIELD) \
 	DIGEST_LIST_FIELD(DIGEST_LIST_ALGO) \
+	DIGEST_LIST_FIELD(DIGEST_LIST_NUM_ENTRIES) \
 	DIGEST_LIST_FIELD(DIGEST_LIST_ENTRY) \
 	DIGEST_LIST_FIELD(DIGEST_LIST_FIELD__LAST)
-
-#define FOR_EACH_DIGEST_LIST_ENTRY_TYPE(DIGEST_LIST_ENTRY_TYPE) \
-	DIGEST_LIST_ENTRY_TYPE(DIGEST_LIST_ENTRY_DATA) \
-	DIGEST_LIST_ENTRY_TYPE(DIGEST_LIST_ENTRY__LAST)
 
 #define FOR_EACH_DIGEST_LIST_ENTRY_FIELD(DIGEST_LIST_ENTRY_FIELD) \
 	DIGEST_LIST_ENTRY_FIELD(DIGEST_LIST_ENTRY_DIGEST) \
 	DIGEST_LIST_ENTRY_FIELD(DIGEST_LIST_ENTRY_PATH) \
 	DIGEST_LIST_ENTRY_FIELD(DIGEST_LIST_ENTRY_FIELD__LAST)
-
 
 #define GENERATE_ENUM(ENUM) ENUM,
 #define GENERATE_STRING(STRING) #STRING,
@@ -104,19 +96,21 @@ static int Frama_C_int_interval(int low, int high)
 #define LENGTH_DETERM 5000
 #define LENGTH_NON_DETERM 100
 
-typedef int (*hdr_callback)(void *callback_data, __u16 data_type,
-			    __u32 num_entries, __u32 total_len);
-typedef int (*data_callback)(void *callback_data, __u16 field,
-			     const __u8 *field_data, __u32 field_len);
+#define U32_MAX UINT32_MAX
 
 /**
- * enum digest_list_types - Types of digest list
+ * typedef callback - Callback after parsing TLV entry
+ * @callback_data: Opaque data to supply to the data callback function
+ * @field: Field identifier
+ * @field_data: Field data
+ * @field_len: Length of @field_data
  *
- * Enumerates the types of digest list to parse.
+ * This callback is invoked after a TLV entry is parsed.
+ *
+ * Return: 0 on success, a negative value on error.
  */
-enum digest_list_types {
-	FOR_EACH_DIGEST_LIST_TYPE(GENERATE_ENUM)
-};
+typedef int (*callback)(void *callback_data, __u16 field,
+			const __u8 *field_data, __u32 field_len);
 
 /**
  * enum fields - Digest list fields
@@ -125,15 +119,6 @@ enum digest_list_types {
  */
 enum digest_list_fields {
 	FOR_EACH_DIGEST_LIST_FIELD(GENERATE_ENUM)
-};
-
-/**
- * enum digest_list_entry_types - Types of data stored in DIGEST_LIST_ENTRY
- *
- * Enumerates the types of data stored in DIGEST_LIST_ENTRY (nested TLV data).
- */
-enum digest_list_entry_types {
-	FOR_EACH_DIGEST_LIST_ENTRY_TYPE(GENERATE_ENUM)
 };
 
 /**
@@ -146,22 +131,6 @@ enum digest_list_entry_fields {
 };
 
 /**
- * struct tlv_hdr - Header of TLV format
- * @data_type: Type of data to parse
- * @_reserved: Reserved for future use (must be equal to zero)
- * @num_entries: Number of data entries provided
- * @total_len: Total length of the data blob, excluding the header
- *
- * This structure represents the header of the TLV data format.
- */
-struct tlv_hdr {
-	__u16 data_type;
-	__u16 _reserved;
-	__u32 num_entries;
-	__u32 total_len;
-} __attribute__((packed));
-
-/**
  * struct tlv_data_entry - Data entry of TLV format
  * @field: Data field identifier
  * @length: Data length
@@ -169,7 +138,7 @@ struct tlv_hdr {
  *
  * This structure represents a TLV entry of the data part of TLV data format.
  */
-struct tlv_data_entry {
+struct tlv_entry {
 	__u16 field;
 	__u32 length;
 	__u8 data[];
@@ -251,116 +220,46 @@ static const int hash_digest_size[HASH_ALGO__LAST] = {
 bool valid_buffer = false;
 
 /**
- * tlv_parse_hdr - Parse TLV header
- * @data: Data to parse (updated)
- * @data_len: Length of @data (updated)
- * @parsed_data_type: Parsed data type (updated)
- * @parsed_num_entries: Parsed number of data entries (updated)
- * @parsed_total_len: Parsed length of TLV data, excluding the header (updated)
- * @data_types: Array of data type strings
- * @num_data_types: Number of elements of @data_types
- *
- * Parse the header of the TLV data format, move the data pointer to the TLV
- * data part, decrease the data length by the length of the header, and provide
- * the data type, number of entries and the total data length extracted from the
- * header.
- *
- * Return: Zero on success, a negative value on error.
- */
-/*@ requires \valid_read(*data+(0..*data_len-1)) && \initialized(*data+(0..*data_len-1)) && \valid(parsed_num_entries) && \valid(parsed_total_len) && \valid_read(data_types);
-  @ assigns *data, *data_len, *parsed_num_entries, *parsed_total_len;
-  @ ensures \valid_read(*data+(0..*data_len-1));
- */
-static int tlv_parse_hdr(hdr_callback hdr_callback, void *hdr_callback_data,
-			 const __u8 **data, size_t *data_len,
-			 __u32 *parsed_num_entries, __u32 *parsed_total_len,
-			 const char **data_types, __u16 num_data_types)
-{
-	__u16 parsed_data_type;
-	struct tlv_hdr *hdr;
-
-	if (*data_len < sizeof(*hdr)) {
-		pr_debug("Data blob too short, %zu bytes, expected %lu\n",
-			 *data_len, sizeof(*hdr));
-		return -EBADMSG;
-	}
-
-	hdr = (struct tlv_hdr *)*data;
-
-	*data += sizeof(*hdr);
-	*data_len -= sizeof(*hdr);
-
-	parsed_data_type = __be16_to_cpu(hdr->data_type);
-	if (parsed_data_type >= num_data_types) {
-		pr_debug("Invalid data type %u, max: %u\n",
-			 parsed_data_type, num_data_types - 1);
-		return -EBADMSG;
-	}
-
-	*parsed_num_entries = __be32_to_cpu(hdr->num_entries);
-
-	if (hdr->_reserved != 0) {
-		pr_debug("_reserved must be zero\n");
-		return -EBADMSG;
-	}
-
-	*parsed_total_len = __be32_to_cpu(hdr->total_len);
-	if (*parsed_total_len > *data_len) {
-		pr_debug("Invalid total length %u, expected: %zu\n",
-			 *parsed_total_len, *data_len);
-		return -EBADMSG;
-	}
-
-	pr_debug("Header: type: %s, num entries: %u, total len: %d\n",
-		 data_types[parsed_data_type], *parsed_num_entries,
-		 *parsed_total_len);
-
-	return hdr_callback(hdr_callback_data, parsed_data_type,
-			    *parsed_num_entries, *parsed_total_len);
-}
-
-/**
- * tlv_parse_data - Parse TLV data
- * @data_callback: Callback function to call to parse the data entries
- * @data_callback_data: Opaque data to supply to the parse callback function
- * @num_entries: Number of data entries to parse
+ * tlv_parse - Parse TLV data
+ * @callback: Callback function to call to parse the entries
+ * @callback_data: Opaque data to supply to the callback function
  * @data: Data to parse
  * @data_len: Length of @data
  * @fields: Array of field strings
  * @num_fields: Number of elements of @fields
  *
- * Parse the data part of the TLV data format and call the supplied callback
- * function for each data entry, passing also the opaque data pointer.
+ * Parse the TLV data format and call the supplied callback function for each
+ * entry, passing also the opaque data pointer.
  *
  * The callback function decides how to process data depending on the field.
  *
  * Return: Zero on success, a negative value on error.
  */
 /*@ requires \valid_read(data+(0..data_len-1)) && \initialized(data+(0..data_len-1)) && \valid_read(fields);
+  @ terminates !data_len;
   @ assigns \nothing;
  */
-static int tlv_parse_data(data_callback data_callback, void *data_callback_data,
-			  __u32 num_entries, const __u8 *data, size_t data_len,
-			  const char **fields, __u32 num_fields)
+int tlv_parse(callback callback, void *callback_data, const __u8 *data,
+	      size_t data_len, const char **fields, __u32 num_fields)
 {
 	const __u8 *data_ptr = data;
-	struct tlv_data_entry *entry;
+	struct tlv_entry *entry;
 	__u16 parsed_field;
-	__u32 len, i, max_num_entries;
+	__u32 len;
 	int ret;
 
-	max_num_entries = data_len / sizeof(*entry);
+	if (data_len > U32_MAX) {
+		pr_debug("Data too big, size: %zd\n", data_len);
+		return -E2BIG;
+	}
 
-	/* Possibly lower limit on num_entries loop. */
-	if (num_entries > max_num_entries)
-		return -EBADMSG;
-
-	for (i = 0; i < num_entries; i++) {
+	//@ dynamic_split data_len;
+	while (data_len) {
 		if (data_len < sizeof(*entry))
 			return -EBADMSG;
 
 		//@ assert \valid_read(data_ptr+(0..sizeof(*entry) - 1));
-		entry = (struct tlv_data_entry *)data_ptr;
+		entry = (struct tlv_entry *)data_ptr;
 		data_ptr += sizeof(*entry);
 		data_len -= sizeof(*entry);
 
@@ -383,10 +282,8 @@ static int tlv_parse_data(data_callback data_callback, void *data_callback_data,
 			continue;
 
 		//@ dynamic_split len;
-
 		//@ assert \valid_read(data_ptr+(0..len - 1));
-		ret = data_callback(data_callback_data, parsed_field, data_ptr,
-				    len);
+		ret = callback(callback_data, parsed_field, data_ptr, len);
 		if (ret < 0) {
 			pr_debug("Parsing of field %s failed, ret: %d\n",
 				 fields[parsed_field], ret);
@@ -403,100 +300,12 @@ static int tlv_parse_data(data_callback data_callback, void *data_callback_data,
 		return -EBADMSG;
 	}
 
+	//@ merge data_len;
 	return 0;
 }
 
-/**
- * tlv_parse - Parse data in TLV format
- * @hdr_callback: Callback function to call after parsing header
- * @hdr_callback_data: Opaque data to supply to the header callback function
- * @data_callback: Callback function to call to parse the data entries
- * @data_callback_data: Opaque data to supply to the parse callback function
- * @data: Data to parse
- * @data_len: Length of @data
- * @data_types: Array of data type strings
- * @num_data_types: Number of elements of @data_types
- * @fields: Array of field strings
- * @num_fields: Number of elements of @fields
- *
- * Parse data in TLV format and call tlv_parse_data() each time the header
- * callback function returns a positive number.
- *
- * Return: Zero on success, a negative value on error.
- */
-/*@ requires \valid_read(data+(0..data_len-1)) && \initialized(data+(0..data_len-1)) && \valid_read(fields) && \valid_read(data_types); */
-int tlv_parse(hdr_callback hdr_callback, void *hdr_callback_data,
-	      data_callback data_callback, void *data_callback_data,
-	      const __u8 *data, size_t data_len, const char **data_types,
-	      __u16 num_data_types, const char **fields, __u32 num_fields)
-{
-	__u32 parsed_num_entries, parsed_total_len;
-	const __u8 *data_ptr = data;
-	int ret = 0;
-
-	pr_debug("Start parsing data blob, size: %zu\n", data_len);
-
-	if (data_len > UINT32_MAX) {
-		pr_debug("Data too big\n");
-		ret = -E2BIG;
-		goto out;
-	}
-
-	//@ dynamic_split data_len;
-	while (data_len) {
-		ret = tlv_parse_hdr(hdr_callback, hdr_callback_data, &data_ptr,
-				    &data_len, &parsed_num_entries,
-				    &parsed_total_len, data_types,
-				    num_data_types);
-		/* It simplifies the partitioning of the values. */
-		if (ret < 0)
-			goto out;
-
-		//@ dynamic_split parsed_total_len;
-		switch (ret) {
-		case 0:
-			/*
-			 * tlv_parse_hdr() already checked that
-			 * parsed_total_len <= data_len.
-			 */
-			data_ptr += parsed_total_len;
-			data_len -= parsed_total_len;
-			//@ merge parsed_total_len;
-			continue;
-		case 1:
-			break;
-		default:
-			goto out;
-		}
-
-		ret = tlv_parse_data(data_callback, data_callback_data,
-				     parsed_num_entries, data_ptr,
-				     parsed_total_len, fields, num_fields);
-		if (ret < 0)
-			goto out;
-
-		data_ptr += parsed_total_len;
-		data_len -= parsed_total_len;
-		//@ merge parsed_total_len;
-	}
-
-out:
-	//@ merge parsed_total_len;
-	//@ merge data_len;
-	pr_debug("End of parsing data blob, ret: %d\n", ret);
-	return ret;
-}
-
-static const char * digest_list_types_str[] = {
-	FOR_EACH_DIGEST_LIST_TYPE(GENERATE_STRING)
-};
-
 static const char * digest_list_fields_str[] = {
 	FOR_EACH_DIGEST_LIST_FIELD(GENERATE_STRING)
-};
-
-static const char * digest_list_entry_types_str[] = {
-	FOR_EACH_DIGEST_LIST_ENTRY_TYPE(GENERATE_STRING)
 };
 
 static const char * digest_list_entry_fields_str[] = {
@@ -504,7 +313,6 @@ static const char * digest_list_entry_fields_str[] = {
 };
 
 struct tlv_callback_data {
-	__u32 parsed_num_entries;
 	enum hash_algo algo;
 };
 
@@ -624,28 +432,7 @@ static int parse_digest_list_entry_path(struct tlv_callback_data *tlv_data,
 }
 
 /**
- * digest_list_entry_hdr_callback - DIGEST_LIST_ENTRY header callback
- * @callback_data: Callback data
- * @data_type: TLV data type
- * @num_entries: Number of TLV data entries
- * @total_len: Total length of TLV data
- *
- * This callback ensures that only TLV data with type DIGEST_LIST_ENTRY_DATA
- * is processed.
- *
- * Return: 0 to skip processing the data, 1 to process the data.
- */
-static int digest_list_entry_hdr_callback(void *callback_data, __u16 data_type,
-					  __u32 num_entries, __u32 total_len)
-{
-	if (data_type != DIGEST_LIST_ENTRY_DATA)
-		return 0;
-
-	return 1;
-}
-
-/**
- * digest_list_entry_data_callback - DIGEST_LIST_ENTRY data callback
+ * digest_list_entry_callback - DIGEST_LIST_ENTRY callback
  * @callback_data: Callback data
  * @field: Field identifier
  * @field_data: Field data
@@ -657,9 +444,9 @@ static int digest_list_entry_hdr_callback(void *callback_data, __u16 data_type,
  * Return: Zero on success, a POSIX error code otherwise.
  */
 //@ requires \valid_read(field_data+(0..field_data_len - 1));
-static int digest_list_entry_data_callback(void *callback_data, __u16 field,
-					   const __u8 *field_data,
-					   __u32 field_data_len)
+static int digest_list_entry_callback(void *callback_data, __u16 field,
+				      const __u8 *field_data,
+				      __u32 field_data_len)
 {
 	struct tlv_callback_data *tlv_data;
 	int ret;
@@ -689,7 +476,7 @@ static int digest_list_entry_data_callback(void *callback_data, __u16 field,
 
 /**
  * parse_digest_list_entry - Parse DIGEST_LIST_ENTRY field
- * @tlv_data: Parser callback data
+ * @tlv_data: Callback data
  * @field: Field identifier
  * @field_data: Field data
  * @field_data_len: Length of @field_data
@@ -707,10 +494,8 @@ static int parse_digest_list_entry(struct tlv_callback_data *tlv_data,
 
 	kenter(",%u,%u", field, field_data_len);
 
-	ret = tlv_parse(digest_list_entry_hdr_callback, NULL,
-			digest_list_entry_data_callback, tlv_data, field_data,
-			field_data_len, digest_list_entry_types_str,
-			DIGEST_LIST_ENTRY__LAST, digest_list_entry_fields_str,
+	ret = tlv_parse(digest_list_entry_callback, tlv_data, field_data,
+			field_data_len, digest_list_entry_fields_str,
 			DIGEST_LIST_ENTRY_FIELD__LAST);
 
 	kleave(" = %d", ret);
@@ -718,39 +503,44 @@ static int parse_digest_list_entry(struct tlv_callback_data *tlv_data,
 }
 
 /**
- * digest_list_hdr_callback - DIGEST_LIST header callback
- * @callback_data: Callback data
- * @data_type: TLV data type
- * @num_entries: Number of TLV data entries
- * @total_len: Total length of TLV data
+ * parse_digest_list_num_entries - Parse DIGEST_LIST_NUM_ENTRIES field
+ * @tlv_data: Callback data
+ * @field: Field identifier
+ * @field_data: Field data
+ * @field_data_len: Length of @field_data
  *
- * This callback ensures that only TLV data with type DIGEST_LIST_FILE
- * is processed, and stores the total number of TLV data entries to later
- * initialize a new digest cache hash table.
+ * This function parses the DIGEST_LIST_NUM_ENTRIES field (digest list entries).
  *
- * Return: 0 to skip processing the data, 1 to process the data, a POSIX error
- *	   code otherwise.
+ * Return: Zero on success, a POSIX error code otherwise.
  */
-static int digest_list_hdr_callback(void *callback_data, __u16 data_type,
-				    __u32 num_entries, __u32 total_len)
+//@ requires \valid_read(field_data+(0..field_data_len - 1));
+static int parse_digest_list_num_entries(struct tlv_callback_data *tlv_data,
+					 enum digest_list_fields field,
+					 const __u8 *field_data,
+					 __u32 field_data_len)
 {
-	struct tlv_callback_data *tlv_data;
+	__u32 num_entries;
+	int ret;
 
-	tlv_data = (struct tlv_callback_data *)callback_data;
+	kenter(",%u,%u", field, field_data_len);
 
-	if (data_type != DIGEST_LIST_FILE)
-		return 0;
+	if (field_data_len != sizeof(__u32)) {
+		pr_debug("Unexpected data length %u, expected %zu\n",
+			 field_data_len, sizeof(__u32));
+		ret = -EBADMSG;
+		goto out;
+	}
 
-	/* At the moment we process only one block. */
-	if (tlv_data->parsed_num_entries)
-		return -EINVAL;
+	num_entries = __be32_to_cpu(*(__u32 *)field_data);
 
-	tlv_data->parsed_num_entries = num_entries;
-	return 1;
+	ret = 0;
+out:
+	kleave(" = %d", ret);
+	return ret;
 }
 
 /**
- * digest_list_file_callback - DIGEST_LIST data callback
+ * digest_list_data_callback - DIGEST_LIST data callback
  * @callback_data: Callback data
  * @field: Field identifier
  * @field_data: Field data
@@ -775,6 +565,10 @@ static int digest_list_data_callback(void *callback_data, __u16 field,
 	case DIGEST_LIST_ALGO:
 		ret = parse_digest_list_algo(tlv_data, field, field_data,
 					     field_data_len);
+		break;
+	case DIGEST_LIST_NUM_ENTRIES:
+		ret = parse_digest_list_num_entries(tlv_data, field, field_data,
+						    field_data_len);
 		break;
 	case DIGEST_LIST_ENTRY:
 		ret = parse_digest_list_entry(tlv_data, field, field_data,
@@ -815,23 +609,18 @@ static int digest_list_parse_tlv(struct digest_cache *digest_cache,
 {
 	struct tlv_callback_data tlv_data = {
 		.algo = HASH_ALGO__LAST,
-		.parsed_num_entries = 0,
 	};
 
-	return tlv_parse(digest_list_hdr_callback, &tlv_data,
-			 digest_list_data_callback, &tlv_data, data, data_len,
-			 digest_list_types_str, DIGEST_LIST__LAST,
+	return tlv_parse(digest_list_data_callback, &tlv_data, data, data_len,
 			 digest_list_fields_str, DIGEST_LIST_FIELD__LAST);
 }
 
 void digest_list_gen_tlv_deterministic(void)
 {
 	unsigned char a[LENGTH_DETERM], *a_ptr = a;
-	struct tlv_hdr *outer_hdr = (struct tlv_hdr *)a;
-	struct tlv_hdr *inner_hdr;
-	struct tlv_data_entry *outer_entry, *inner_entry;
+	struct tlv_entry *outer_entry, *inner_entry;
 	__u32 outer_num_entries, inner_num_entries, digest_len;
-	__u32 path_len;
+	__u32 path_len, inner_total_len;
 	__u32 i;
 	__u16 algo;
 	int ret;
@@ -843,16 +632,10 @@ void digest_list_gen_tlv_deterministic(void)
 
 	digest_len = hash_digest_size[algo];
 
-	outer_hdr->data_type = __cpu_to_be16(DIGEST_LIST_FILE);
 	outer_num_entries = Frama_C_int_interval(1, 3);
 	//@ split outer_num_entries;
 
-	outer_hdr->num_entries = __cpu_to_be32(outer_num_entries);
-	outer_hdr->total_len = 0;
-
-	a_ptr += sizeof(*outer_hdr);
-
-	outer_entry = (struct tlv_data_entry *)a_ptr;
+	outer_entry = (struct tlv_entry *)a_ptr;
 	a_ptr += sizeof(*outer_entry);
 
 	outer_entry->field = __cpu_to_be16(DIGEST_LIST_ALGO);
@@ -861,34 +644,38 @@ void digest_list_gen_tlv_deterministic(void)
 
 	a_ptr += sizeof(__u16);
 
-	outer_hdr->total_len += sizeof(*outer_entry) + sizeof(__u16);
+	outer_entry = (struct tlv_entry *)a_ptr;
+	a_ptr += sizeof(*outer_entry);
+
+	outer_entry->field = __cpu_to_be16(DIGEST_LIST_NUM_ENTRIES);
+	outer_entry->length = __cpu_to_be32(sizeof(__u32));
+	*(__u32 *)outer_entry->data = __cpu_to_be32(outer_num_entries);
+
+	a_ptr += sizeof(__u32);
 
 	//@ loop unroll outer_num_entries;
-	for (i = 1; i < outer_num_entries; i++) {
-		outer_entry = (struct tlv_data_entry *)a_ptr;
+	for (i = 0; i < outer_num_entries; i++) {
+		outer_entry = (struct tlv_entry *)a_ptr;
 		a_ptr += sizeof(*outer_entry);
 
 		outer_entry->field = __cpu_to_be16(DIGEST_LIST_ENTRY);
-		inner_hdr = (struct tlv_hdr *)a_ptr;
-		a_ptr += sizeof(*inner_hdr);
 
-		inner_hdr->data_type = __cpu_to_be16(DIGEST_LIST_ENTRY_DATA);
 		inner_num_entries = Frama_C_int_interval(1, 2);
 		//@ split inner_num_entries;
 
-		inner_hdr->num_entries = __cpu_to_be32(inner_num_entries);
-		inner_entry = (struct tlv_data_entry *)(inner_hdr + 1);
+		inner_entry = (struct tlv_entry *)a_ptr;
 		a_ptr += sizeof(*inner_entry) + digest_len;
 
 		inner_entry->field = __cpu_to_be16(DIGEST_LIST_ENTRY_DIGEST);
 		inner_entry->length = __cpu_to_be32(digest_len);
 		memset(inner_entry->data, 'A', digest_len);
 
-		inner_hdr->total_len = sizeof(*inner_entry) + digest_len;
+		inner_total_len = sizeof(*inner_entry) + digest_len;
 
 		if (inner_num_entries == 2) {
-			inner_entry = (struct tlv_data_entry *)a_ptr;
+			inner_entry = (struct tlv_entry *)a_ptr;
 			a_ptr += sizeof(*inner_entry);
+			inner_total_len += sizeof(*inner_entry);
 
 			inner_entry->field = __cpu_to_be16(DIGEST_LIST_ENTRY_PATH);
 			path_len = Frama_C_int_interval(10, 12);
@@ -898,17 +685,11 @@ void digest_list_gen_tlv_deterministic(void)
 
 			memset(inner_entry->data, 'B', path_len);
 			a_ptr += path_len;
-
-			inner_hdr->total_len += sizeof(*inner_entry) + path_len;
+			inner_total_len += path_len;
 		}
 
-		outer_entry->length = sizeof(*inner_hdr) + inner_hdr->total_len;
-		outer_hdr->total_len += sizeof(*outer_entry) + outer_entry->length;
-		inner_hdr->total_len = __cpu_to_be32(inner_hdr->total_len);
-		outer_entry->length  = __cpu_to_be32(outer_entry->length);
+		outer_entry->length  = __cpu_to_be32(inner_total_len);
 	}
-
-	outer_hdr->total_len = __cpu_to_be32(outer_hdr->total_len);
 
 	ret = digest_list_parse_tlv(NULL, a, a_ptr - a);
 	//@ assert ret == 0;
